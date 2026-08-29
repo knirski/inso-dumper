@@ -132,7 +132,7 @@
             "parse_timeline_page from T2",
             "foundation spec's http/children_shell.py as a pattern"
           ],
-          "description": "Add to src/inso_dumper/http/timeline.py an async def list_posts(client, session, child_uuid, category) -> AsyncIterator[Post] that yields Post and surfaces Err on transport / waitingToProcess failures. On each iteration, build the path f'/system-api/timeline/posts?page={page}&categoryId={category.api_id}&child={child_uuid}' and call client.request('GET', path, headers={'Cookie': f'PHPSESSID={session.phpsessid}'}). Parse via parse_timeline_page. Stop when the parsed items list is empty. On waitingToProcess > 0 retry the same page with exponential backoff (cap 30s, 3 attempts); on the 4th attempt give up with Err(CliError(HTTP, subject='waiting_to_process')). The shell does not use the Ok([]) stop signal if waitingToProcess > 0.",
+          "description": "Add to src/inso_dumper/http/timeline.py an async def list_posts(client, session, child_uuid, category) -> AsyncIterator[CliResult[Post]] that yields Ok(post) per post and yields Err (then stops) on transport / waitingToProcess / non-200 failures — the Result-yielding shape is required to surface Err without raising, per AGENTS.md. A 401/403 surfaces Err(SESSION_EXPIRED, 'timeline_posts') per the design's session-lifetime rule; other non-200 statuses surface Err(HTTP, 'status_<n>'). On each iteration, build the path f'/system-api/timeline/posts?page={page}&categoryId={category.api_id}&child={child_uuid}' and call client.request('GET', path, headers={'Cookie': f'PHPSESSID={session.phpsessid}'}). Parse via parse_timeline_page. Stop when the parsed items list is empty. On waitingToProcess > 0 retry the same page with exponential backoff (cap 30s, 3 attempts); on the 4th attempt give up with Err(CliError(HTTP, subject='waiting_to_process')). The shell does not use the Ok([]) stop signal if waitingToProcess > 0.",
           "files": {
             "reuse": [
               "src/inso_dumper/http/client.py (HttpClient Protocol)",
@@ -158,7 +158,7 @@
           "validation": {
             "tests": [
               "one-page response (10 items) yields 10 Posts, stops",
-              "two-page response (10 + 10) yields 20, makes 2 GET calls",
+              "two-page response (10 + 10) yields 20, makes 3 GET calls (stop on the first empty page per design — one extra request past the end)",
               "last page with <10 items yields them all, stops on the next empty page",
               "waitingToProcess=1 then a settled page yields the settled page's items (no duplicate)",
               "waitingToProcess=1 on all 3 retries surfaces Err(CliError(HTTP, 'waiting_to_process'))",
@@ -179,7 +179,7 @@
             "Post model with its Media.photos and Media.attachments",
             "design.md Findings (signed-URL semantics)"
           ],
-          "description": "Add to src/inso_dumper/http/timeline.py an async def download_media(client, post) -> AsyncIterator[tuple[MediaItemKind, str, bytes]] where MediaItemKind is a small StrEnum (PHOTO / ATTACHMENT) and the str is the original name. The function iterates post.media.photos then post.media.attachments, GETting src.full / url for each. The signed URL is absolute (host file.inso.pl); the shell passes the full URL as the path argument so HttpxClient's base_url join yields the right request, and the shell sets the Host header. Bytes are streamed, never accumulated. Client errors propagate as Err(CliError(HTTP, 'media_download')). The function does not compute hashes — that is the writer's job (P3).",
+          "description": "Add to src/inso_dumper/http/timeline.py an async def download_media(client, post) -> AsyncIterator[CliResult[tuple[MediaItemKind, str, bytes]]] (yielding Ok per file and Err to surface failures without raising, matching list_posts) where MediaItemKind is a small StrEnum (PHOTO / VIDEO / ATTACHMENT) and the str is the original name. The function iterates post.media.photos, then post.media.videos, then post.media.attachments. The function iterates post.media.photos then post.media.attachments, GETting src.full / url for each. The signed URL is absolute (host file.inso.pl); the shell passes the full URL as the path argument so HttpxClient's base_url join yields the right request, and the shell sets the Host header. Each media file's bytes are read fully into memory before the yield (per-file buffering; no cross-file accumulation, no incremental hash-streaming in v1). Client errors propagate as Err(CliError(HTTP, 'media_download')). The function does not compute hashes — that is the writer's job (P3).",
           "files": {
             "reuse": [
               "src/inso_dumper/http/client.py (HttpClient Protocol)"
