@@ -90,13 +90,12 @@ class _SwitcherParser(HTMLParser):
         if tag != "a" or self._anchor_depth == 0:
             return
         self._anchor_depth -= 1
-        if self._anchor_depth == 0:
-            if self._matching:
-                self._finalize()
-                self._matching = False
-                self._uuid = None
-                self._color = None
-                self._spans = []
+        if self._anchor_depth == 0 and self._matching:
+            self._finalize()
+            self._matching = False
+            self._uuid = None
+            self._color = None
+            self._spans = []
 
     def handle_data(self, data: str) -> None:
         if self._span_open > 0:
