@@ -195,9 +195,10 @@ Layer rules:
   models. This keeps the auth payload shape unit-testable from recorded
   HAR fixtures without making real HTTP calls.
 - `http/client.py` defines a `HttpClient` `Protocol` (`async def request(method, url, **kw) -> Response`)
-  and an `HttpxClient` implementation. The `Protocol` exists so the
-  foundation can ship against JSON-API auth **and** be re-pointed at a
-  browser-driven `BrowserClient` later without touching call sites.
+  and an `HttpxClient` implementation. The `Protocol` exists so a
+  future spec can swap in a different transport (`CurlClient` for
+  Cloudflare, `BrowserClient` for JavaScript-only pages) without
+  touching call sites; v1 ships only `HttpxClient`.
 - `cli.py` wires commands: it loads config, builds an `HttpClient`, calls
   `auth.login` or `children.list_children`, formats with `rich`, exits.
   No business logic in the CLI.
@@ -292,8 +293,12 @@ The spike (`docs/api-notes.md`) picked the "HTML scrape" branch of
 `plan.md` Phase 0's decision point. The HttpClient Protocol is still
 valuable: the foundation needs to `POST /login` and `GET
 /panel/home/<uuid>/`, and future specs will fetch many more URLs.
-To avoid a re-plumbing when the next constraint forces a fallback,
-`HttpClient` is a `Protocol`:
+
+A second probe against the spike environment (recorded in this
+spec, see *Cloudflare verification* below) confirmed that `httpx`
+**with a browser-like default header set** gets HTTP 200 from
+app.inso.pl's Cloudflare front door. No `curl_cffi`, no
+subprocess `curl`, no agent-browser fallback is needed for v1.
 
 ```python
 class HttpClient(Protocol):
@@ -314,12 +319,38 @@ class Response:
     def text(self) -> str: ...
 ```
 
-`HttpxClient` implements it. The follow-up spec for
-`announcements-and-dedup` may add a `CurlClient` (subprocess, real TLS
-fingerprint) or a `BrowserClient` (agent-browser) implementation if
-the Cloudflare 403 problem documented in `api-notes.md` turns out to
-block `httpx` in production. The Protocol keeps that decision
-contained to one module.
+`HttpxClient` is the only v1 implementation. The Protocol is still
+worth its keep: the v1 client pins a hardcoded
+`BROWSER_LIKE_HEADERS` constant; if Cloudflare ever tightens, a
+follow-up can swap in a `CurlClient` (subprocess) or a
+`BrowserClient` (agent-browser) without touching call sites.
+
+### Cloudflare verification (v1)
+
+`HttpxClient` MUST send a documented minimum header set on every
+request:
+
+```python
+# http/client.py
+BROWSER_LIKE_HEADERS: Mapping[str, str] = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "sec-ch-ua": '"Not?A_Brand";v="24", "Chromium";v="152"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "Upgrade-Insecure-Requests": "1",
+}
+```
+
+A test in `tests/unit/test_http_client.py` asserts the constant is
+present and immutable, and a recorded-response test exercises the
+header set against a fixture (HAR entry from the spike) so future
+changes do not silently regress on Cloudflare. The HTTP exit code
+(5) still covers any future 403 — the constant is the prevention,
+the exit code is the safety net.
 
 ## API Design
 
@@ -346,8 +377,10 @@ inso-dumper --help
 - Prints `OK` to stdout on success. Prints the platform `user_uuid` and
   any debuggable session fields at `INFO` level (the cookie value itself
   is redacted by the log filter).
-- On auth failure (HTTP 401/403, missing `PHPSESSID` in the response,
-  Cloudflare 403), exits 3 with a redacted message.
+- On auth failure (HTTP 401/403, missing `PHPSESSID` in the response),
+  exits 3 with a redacted message. Cloudflare 403s are mitigated by
+  the `BROWSER_LIKE_HEADERS` constant in `HttpxClient`; if Cloudflare
+  ever tightens, the request still surfaces as exit 5 (`HTTP`).
 
 `children`:
 
@@ -564,23 +597,17 @@ deferred to follow-up specs.
 
 **Still open (deferred):**
 
-7. **Cloudflare bot management** — a plain `httpx` POST is
-   rejected with HTTP 403 by Cloudflare's bot management in the
-   spike environment. `curl` and the agent-browser-driven
-   Chromium succeed. The follow-up `announcements-and-dedup` spec
-   must decide which HTTP client path to use and may need to
-   swap `HttpxClient` for `CurlClient` or `BrowserClient`.
-8. **Session lifetime** — the spike did not measure how long
+7. **Session lifetime** — the spike did not measure how long
    `PHPSESSID` stays valid. The foundation treats `expires_at`
    as `None` and re-validates on every load. The
    `announcements-and-dedup` spec should measure and pin a
    value.
-9. **2FA on accounts other than the spike's** — out of scope
+8. **2FA on accounts other than the spike's** — out of scope
    for v1; the `login` command has no `NEEDS_2FA` exit-code
    variant. If the user's account acquires 2FA, the
    `login` command needs an interactive prompt path. Documented
    as a known follow-up.
-10. **`Child.last_name` discovery** — the sidebar markup only
+9. **`Child.last_name` discovery** — the sidebar markup only
     carries the first name. The follow-up `announcements-and-dedup`
     spec should add lazy discovery (one extra page per child) to
     fill this field. Until then, the slug is `firstname-<initial>`

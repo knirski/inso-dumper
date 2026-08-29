@@ -11,13 +11,14 @@ The Inso platform is a **server-rendered PHP application** behind
 Cloudflare. There is **no JSON API** for parent-facing content. Auth
 is a one-step form POST that returns a single `HttpOnly PHPSESSID`
 cookie. The children list is **embedded in the HTML of any logged-in
-page** in the sidebar's child-switcher menu. The browser-driven path
+page** in the sidebar's child-switcher menu. The HTML-scrape path
 in `plan.md` Phase 0 is the correct one.
 
-This changes the architecture fork in the spec from "JSON API vs.
-browser-driven scrape" to **"HTML scrape, with a clear long-term
-migration path to a browser-driven path if Cloudflare blocks the
-plain HTTP client"** — see *Cloudflare bot management* below.
+Cloudflare blocks bare HTTP clients, but **passes `httpx` with a
+realistic browser header set** — confirmed in the spike and a
+follow-up probe on 2026-08-29. See *Cloudflare bot management* below.
+The `HttpxClient` production transport sends a fixed
+`BROWSER_LIKE_HEADERS` constant on every request.
 
 ## Auth model
 
@@ -57,33 +58,30 @@ plain HTTP client"** — see *Cloudflare bot management* below.
 
 ## Cloudflare bot management
 
-A direct `urllib` request from Python 3.14 is **rejected with HTTP 403**
-by Cloudflare's bot management on the first request — confirmed locally
-on 2026-08-29. `curl` succeeds. `httpx` from a `uv run` environment
-behaves the same as `urllib` (rejected) until the TLS fingerprint is
-fixed.
+A bare `httpx` request (no headers set beyond defaults) is **rejected
+with HTTP 403** by Cloudflare's bot management. A bare `urllib`
+request is rejected for the same reason. `curl` succeeds.
 
-**Implication for v1:** the foundation spec's "HttpxClient
-implementation" path will fail on real Cloudflare traffic. Three
-options, in order of preference:
+**Re-tested on 2026-08-29 with browser-like headers** (User-Agent,
+sec-ch-ua, Accept-Language: pl-PL, sec-ch-ua-platform, etc. — the
+exact set is documented in
+`docs/specs/2026-08-29-foundation-auth-cli/design.md` § Cloudflare
+verification). With those headers, `httpx` gets HTTP 200 and a clean
+14 KB HTML response. End-to-end login + authenticated dashboard
+fetch also works through `httpx` (302 on POST `/login` with
+`Set-Cookie: PHPSESSID=…`, then GET dashboard returns 200 with
+both children's names visible).
 
-1. **HTML scrape with `httpx`** — works in many cases; if it 403s in
-   practice, escalate.
-2. **HTML scrape with `curl` via subprocess** — pragmatic and works
-   today; wraps the entire TLS-fingerprint problem inside a battle-
-   tested binary. Downside: subprocess orchestration in the
-   functional core.
-3. **Browser-driven path via `agent-browser`** — drops to
-   `agent-browser`'s Chrome instance; passes Cloudflare trivially.
-   Slowest, but bulletproof.
+**Conclusion for v1:** `HttpxClient` is the production transport. No
+`curl_cffi`, no subprocess `curl`, no `agent-browser` fallback. The
+`HttpxClient` pins a `BROWSER_LIKE_HEADERS` constant and includes it
+on every request; a test asserts the constant stays present.
 
-The spec should ship (1) with (3) as a documented fallback that
-`HttpClient` already accommodates via the existing `Protocol` design.
-The follow-up spec that lands after the spike **must** decide which
-of (1), (2), (3) is the production path, and revise the
-`HttpxClient` accordingly. Until then, the foundation ships with
-`HttpxClient` and a 403-on-auth failure mode that's classified as
-`HTTP` and surfaces in the exit-code-5 branch.
+If Cloudflare ever tightens to the point of rejecting this header
+set, the existing `HttpClient` Protocol accommodates a transport
+swap (subprocess `curl`, `curl_cffi`, or `agent-browser`) without
+call-site changes. The exit code 5 (`HTTP`) covers the failure
+mode regardless.
 
 ## Children endpoint
 
@@ -215,14 +213,11 @@ plus `remember_me: str | None` for forward compat, but v1 only needs
 
 ## Open Questions (still open after this spike)
 
-1. **Production HTTP client choice** — `httpx` returns 403 from
-   Cloudflare's bot management; `curl` works. The follow-up spec
-   must decide. See *Cloudflare bot management* above.
-2. **Session lifetime** — not measured. The `expires_at` field in
+1. **Session lifetime** — not measured. The `expires_at` field in
    the persisted session is currently always `None` and treated as
    "validate on every load" (i.e. re-login required every run).
    The follow-up announcement spec can measure the real value.
-3. **2FA on this account** — none encountered. The spike logged in
+2. **2FA on this account** — none encountered. The spike logged in
    cleanly. If a future account has 2FA, the foundation is
    unprepared: the `login` command's error taxonomy has no
    `NEEDS_2FA` variant. **Defer to that account.**
