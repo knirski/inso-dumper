@@ -110,9 +110,7 @@ def test_httpx_client_returns_404_as_ok_response() -> None:
     """A non-2xx status is a Response, not a transport error."""
     sent_status = 0
 
-    def fake_send(
-        self: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
-    ) -> httpx.Response:
+    def fake_send(self: httpx.AsyncClient, request: httpx.Request, **kwargs: Any) -> httpx.Response:
         nonlocal sent_status
         sent_status = 403
         return httpx.Response(
@@ -132,12 +130,8 @@ def test_httpx_client_returns_404_as_ok_response() -> None:
         # and rebind send on it.
         original_send = client._client.send  # type: ignore[attr-defined]
 
-        async def patched_send(
-            request: httpx.Request, **kwargs: Any
-        ) -> httpx.Response:
-            return httpx.Response(
-                status_code=403, content=b"blocked", request=request
-            )
+        async def patched_send(request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(status_code=403, content=b"blocked", request=request)
 
         client._client.send = patched_send  # type: ignore[method-assign]
         result = await client.request("GET", "/")
@@ -155,9 +149,7 @@ def test_httpx_client_translates_connect_error_to_err() -> None:
     client = HttpxClient(cfg)
 
     async def run() -> None:
-        async def patched_send(
-            request: httpx.Request, **kwargs: Any
-        ) -> httpx.Response:
+        async def patched_send(request: httpx.Request, **kwargs: Any) -> httpx.Response:
             raise httpx.ConnectError("simulated", request=request)
 
         client._client.send = patched_send  # type: ignore[method-assign]
@@ -176,18 +168,12 @@ def test_httpx_client_sends_form_body() -> None:
     captured: list[httpx.Request] = []
 
     async def run() -> None:
-        async def patched_send(
-            request: httpx.Request, **kwargs: Any
-        ) -> httpx.Response:
+        async def patched_send(request: httpx.Request, **kwargs: Any) -> httpx.Response:
             captured.append(request)
-            return httpx.Response(
-                status_code=302, content=b"", request=request
-            )
+            return httpx.Response(status_code=302, content=b"", request=request)
 
         client._client.send = patched_send  # type: ignore[method-assign]
-        result = await client.request(
-            "POST", "/login", form={"_username": "x", "_password": "y"}
-        )
+        result = await client.request("POST", "/login", form={"_username": "x", "_password": "y"})
         assert isinstance(result, Ok)
 
     asyncio.run(run())

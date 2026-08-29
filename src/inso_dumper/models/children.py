@@ -65,9 +65,7 @@ class Child:
     @property
     def slug(self) -> str:
         first = _ascii_fold(self.first_name).lower()
-        last_initial = (
-            _ascii_fold(self.last_name[:1]).lower() if self.last_name else ""
-        )
+        last_initial = _ascii_fold(self.last_name[:1]).lower() if self.last_name else ""
         base = f"{first}-{last_initial}" if last_initial else first
         slug = _SLUG_RE.sub("-", base).strip("-")
         return slug or "child"

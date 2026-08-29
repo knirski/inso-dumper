@@ -146,17 +146,9 @@ def parse_children_list(html: str) -> CliResult[list[Child]]:
         parser.feed(html)
         parser.close()
     except Exception:  # malformed HTML shouldn't crash the CLI
-        return Err(
-            CliError(
-                kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"
-            )
-        )
+        return Err(CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"))
     if not parser.found_menu:
-        return Err(
-            CliError(
-                kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"
-            )
-        )
+        return Err(CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"))
     return Ok(parser.children)
 
 

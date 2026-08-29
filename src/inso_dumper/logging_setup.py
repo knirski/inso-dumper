@@ -25,9 +25,7 @@ _SENSITIVE_KEY = re.compile(
     r")\s*=\s*([^\s;,]+)"
 )
 # Match ``Authorization: Bearer <opaque>`` style — no equals sign.
-_SENSITIVE_BEARER = re.compile(
-    r"(?i)\b(authorization\s*:\s*bearer)\s+(\S+)"
-)
+_SENSITIVE_BEARER = re.compile(r"(?i)\b(authorization\s*:\s*bearer)\s+(\S+)")
 _REDACTED = "<redacted>"
 
 

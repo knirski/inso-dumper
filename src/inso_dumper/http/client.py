@@ -35,9 +35,7 @@ BROWSER_LIKE_HEADERS: Mapping[str, str] = MappingProxyType(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
         ),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        ),
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
         "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "sec-ch-ua": '"Not?A_Brand";v="24", "Chromium";v="152"',
@@ -123,9 +121,7 @@ class HttpxClient:
                     headers=merged,
                 )
             else:
-                response = await self._client.request(
-                    method, path, headers=merged
-                )
+                response = await self._client.request(method, path, headers=merged)
         except httpx.HTTPError as exc:
             return Err(_classify_http_error(exc))
         except OSError as exc:

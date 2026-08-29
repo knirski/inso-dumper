@@ -50,7 +50,7 @@ def load_config(path: Path | None = None) -> Ok[Config] | Err[CliError]:
     target = path if path is not None else config_file()
     try:
         raw = _read_toml(target)
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="config_parse"))
     if raw is None:
         return Ok(Config())
