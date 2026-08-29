@@ -45,6 +45,7 @@ from inso_dumper.logging_setup import (
     is_verbose,
     setup_logging,
 )
+from inso_dumper.models.children import Child
 from inso_dumper.models.timeline import Category
 from inso_dumper.paths import session_file
 from inso_dumper.session.store import save_session
@@ -104,10 +105,10 @@ def _die(err: CliError, log: Logger) -> NoReturn:
     raise typer.Exit(exit_code_for(err))
 
 
-def _dispatch(
-    coro_factory: Callable[[], Awaitable[CliResult[Any]]],
+def _dispatch[ValueT](
+    coro_factory: Callable[[], Awaitable[CliResult[ValueT]]],
     log: Logger,
-) -> CliResult[Any]:
+) -> CliResult[ValueT]:
     """Run a coroutine in a single asyncio.run with the last-resort catch.
 
     ``coro_factory`` builds the coroutine so the HttpxClient is constructed
@@ -293,7 +294,7 @@ def sync(
 
     available: list[str] = []
 
-    async def _do_sync() -> CliResult[Any]:
+    async def _do_sync() -> CliResult[SyncSummary]:
         cfg_result = load_config(config_path)
         if isinstance(cfg_result, Err):
             return cfg_result
@@ -301,7 +302,7 @@ def sync(
         totals = SyncSummary(0, 0, 0, 0, 0, 0.0)
         async with HttpxClient(cfg) as client:
             kids_result = await list_children_shell(client, cfg, session)
-            child: Any = None
+            child: Child | None = None
             match kids_result:
                 case Err(error):
                     return Err(error)

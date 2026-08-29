@@ -295,9 +295,13 @@ Layer rules:
   `parse_post_detail(bytes) -> Result[Post, CliError]`. **Pure** —
   take bytes, return models. No IO.
 - `http/timeline.py` shell: `list_posts(client, session, child_uuid, category_id) -> AsyncIterator[Post]`
-  and `download_media(client, post) -> AsyncIterator[tuple[MediaItemKind, str, bytes]]`
-  (media kind, original name, bytes). Both call into
-  the existing `HttpClient` and convert network errors to `CliError(HTTP)`.
+  and `download_media(client, post) -> AsyncIterator[tuple[MediaItemKind, str, str, bytes]]`
+  (media kind, original name, source URL, bytes — the URL enables the
+  extension fallback in `ext_from` downstream). Both call into
+  the existing `HttpClient` and convert network errors to
+  `CliError(HTTP)`; `download_media` surfaces non-200 responses as
+  `Err(CliError(HTTP, 'media_status_<n>'))` so e.g. a 403 vs 404 on an
+  expired signed URL is visible in output.
 - `dump/layout.py` is **pure** — no IO. `derive_post_slug(title, date) -> str`,
   `dedup_target(hash, ext) -> Path`, `post_target_dir(dump_root, child_slug, post) -> Path`.
 - `dump/writer.py` is the **shell** boundary for disk: atomic write

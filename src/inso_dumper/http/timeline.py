@@ -162,8 +162,8 @@ async def list_posts(
 async def download_media(
     client: HttpClient,
     post: Post,
-) -> AsyncIterator[CliResult[tuple[MediaItemKind, str, bytes]]]:
-    """Fetch each media file's bytes, yielding ``(kind, name, bytes)``.
+) -> AsyncIterator[CliResult[tuple[MediaItemKind, str, str, bytes]]]:
+    """Fetch each media file's bytes, yielding ``(kind, name, url, bytes)``.
 
     Photos and videos both arrive in ``media.photos[]`` (discriminated
     by ``type``) — photo bytes from ``src.full``, video bytes from
@@ -174,8 +174,10 @@ async def download_media(
     cross-file accumulation, no incremental hashing in v1 — the writer
     hashes the yielded bytes).
 
-    Errors are yielded as ``Err(CliError(HTTP, 'media_download'))`` —
-    or the client's Err unchanged — and end the iteration.
+    Errors are yielded as ``Err(CliError(HTTP, 'media_status_<n>'))``
+    for non-200 responses (the status is in the subject for support
+    diagnostics — e.g. 403 vs 404 on an expired signed URL) — or the
+    client's Err unchanged — and end the iteration.
     """
     items: list[tuple[MediaItemKind, str, str]] = []
     for media in post.media.photos:
@@ -195,9 +197,9 @@ async def download_media(
             case Ok(response):
                 pass
         if response.status != 200:
-            yield Err(CliError(kind=CliErrorKind.HTTP, subject="media_download"))
+            yield Err(CliError(kind=CliErrorKind.HTTP, subject=f"media_status_{response.status}"))
             return
-        yield Ok((kind, name, response.body))
+        yield Ok((kind, name, url, response.body))
 
 
 __all__ = ["MediaItemKind", "download_media", "list_posts", "parse_timeline_page"]
