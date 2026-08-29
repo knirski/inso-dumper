@@ -1,3 +1,15 @@
 # Captured HTTP traffic from the discovery spike. Contains session cookies
 # and auth headers. Never commit.
 docs/api-notes/har/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# uv
+.uv-cache/
+
+# Command Code session state (local-only; never commit)
+.commandcode/
