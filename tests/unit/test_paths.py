@@ -55,3 +55,28 @@ def test_paths_resolver_is_pure() -> None:
     a = paths.config_file()
     b = paths.config_file()
     assert a == b
+
+
+def test_state_dir_raises_when_home_and_xdg_state_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without HOME or XDG_STATE_HOME, refuse to write a relative path.
+
+    A relative Path(fallback) would resolve against the current
+    working directory, which is unpredictable and can leak session
+    data into a build tree. The resolver raises RuntimeError instead.
+    """
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    with pytest.raises(RuntimeError, match="Cannot resolve"):
+        paths.state_dir()
+
+
+def test_config_file_raises_when_home_and_xdg_config_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
+    with pytest.raises(RuntimeError, match="Cannot resolve"):
+        paths.config_file()
