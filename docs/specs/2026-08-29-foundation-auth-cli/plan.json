@@ -1,0 +1,546 @@
+{
+  "feature": "foundation-auth-cli",
+  "spec": "docs/specs/2026-08-29-foundation-auth-cli/design.md",
+  "goal": "Ship a runnable inso-dumper that authenticates against app.inso.pl and lists the children on the account, ending the foundation's M1 checkpoint.",
+  "preserved_behavior": [
+    "docs/api-notes.md remains the source of truth for the auth model, the children URL pattern, and the Cloudflare mitigation.",
+    "The PRD's read-only-scraping rule and the AGENTS.md secrets policy are honored end-to-end.",
+    "AGENTS.md's strengthened FC/IS rule (commit 0953f9e) is the load-bearing constraint on every shell-vs-core choice."
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Project skeleton and Result primitive",
+      "tasks": [
+        {
+          "id": "T1",
+          "name": "Initialize uv-managed project and toolchain",
+          "depends_on": [],
+          "inputs": [
+            "AGENTS.md Tooling and Python style sections",
+            "spec Constraints section",
+            "spec Repo layout section"
+          ],
+          "description": "Create the uv-managed package with requires-python = '>=3.14', a .python-version file, the dependency set from the spec (httpx, typer, rich, pydantic, dev: pytest, pytest-asyncio, ruff, basedpyright), the tool.ruff (target-version = 'py314'), tool.basedpyright (recommended), and tool.pytest.ini_options blocks copied from the python-build-tools reference. Create the empty src/inso_dumper/ and tests/{unit,integration}/ trees with __init__.py files and a py.typed marker. Add a console_scripts entry so 'uv run inso-dumper ...' resolves.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "pyproject.toml",
+              ".python-version",
+              "uv.lock",
+              "src/inso_dumper/__init__.py",
+              "src/inso_dumper/py.typed",
+              "tests/__init__.py",
+              "tests/unit/__init__.py",
+              "tests/integration/__init__.py",
+              "tests/conftest.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "'uv run python -c \"import inso_dumper\"' succeeds",
+              "'uv run inso-dumper --help' exits 0 (typer stub command)",
+              "'uv run pytest -q' runs an empty suite"
+            ],
+            "acceptance": [
+              "'uv sync --locked' succeeds",
+              "'uv run ruff check .' is clean",
+              "'uv run basedpyright' reports 0 errors",
+              "py.typed is present so downstream consumers get type info"
+            ]
+          }
+        },
+        {
+          "id": "T2",
+          "name": "Define Result, Ok, Err and CliError",
+          "depends_on": ["T1"],
+          "inputs": [
+            "AGENTS.md Result type section",
+            "AGENTS.md Functional core / imperative shell rule",
+            "spec Error handling approach"
+          ],
+          "description": "Create src/inso_dumper/_result.py with PEP 695 generic Ok[ValueT], Err[ErrorT], and the Result[ValueT, ErrorT] = Ok[ValueT] | Err[ErrorT] type alias, all @dataclass(frozen=True, slots=True). Create src/inso_dumper/errors.py with CliErrorKind(StrEnum) and the @dataclass(frozen=True, slots=True) class CliError payload. Add the type CliResult[T] = Result[T, CliError] alias. Both modules are functional core: no IO, no try/except for control flow, no module-level side effects. errors.py is referenced by both core (parsers) and shell (IO boundaries); the core never sees an exception it must catch.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/_result.py",
+              "src/inso_dumper/errors.py",
+              "tests/unit/test_result.py",
+              "tests/unit/test_errors.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Ok, Err, Result",
+              "requirement": "typed outcome at every recoverable failure boundary (AGENTS.md Result type)",
+              "consumers": [
+                "every parser and shell function in later phases"
+              ]
+            },
+            {
+              "name": "CliErrorKind, CliError, CliResult",
+              "requirement": "closed error family with stable exit codes (spec Error handling approach)",
+              "consumers": [
+                "cli.py",
+                "all parsers",
+                "all IO shells"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "Ok(v) and Err(e) are frozen/slotted",
+              "pattern match exhaustively on Result[int, str] covers both arms",
+              "CliErrorKind is a StrEnum",
+              "CliError rejects unknown extra fields",
+              "CliResult aliases resolve under basedpyright",
+              "both modules pass ruff and basedpyright with no IO imports"
+            ],
+            "acceptance": [
+              "match-on-Result in a test demonstrates the assert_never exhaustiveness",
+              "CliError cannot be constructed with a kind outside CliErrorKind"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "Config, paths, logging, session store",
+      "tasks": [
+        {
+          "id": "T3",
+          "name": "Config loader, paths, and logging setup",
+          "depends_on": ["T2"],
+          "inputs": [
+            "spec Config surface section",
+            "spec Logging section",
+            "AGENTS.md Functional core / imperative shell rule (this is mixed: paths and Config model are core, load_config and logging_setup are shell)"
+          ],
+          "description": "paths.py resolves ~/.config/inso-dumper/config.toml and ~/.local/state/inso-dumper/ using xdg semantics; the resolver is a pure function over its inputs, not a call to os.environ (the env lookup happens in load_config). config.py defines the Config pydantic model (base_url, rate_limit_per_second, request_timeout_seconds) with extra='forbid' — pure data. load_config(path=None, env=None) is the shell function: it reads the TOML file (if present), layers INSO_DUMPER_CONFIG env override, and on a parse error returns Err(CliError(CONFIG, 'config_parse')). A missing file returns Ok(defaults) because defaults are the missing-file case. logging_setup.py configures the rich-backed stderr logger at INFO (or DEBUG if INSO_DUMPER_VERBOSE=1) and installs a TokenRedactingFilter at the root logger that scrubs (?i)(token|cookie|set-cookie|password|secret)=? from record messages. The filter is a logging concern, not a FC/IS boundary; it lives with the shell.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/paths.py",
+              "src/inso_dumper/config.py",
+              "src/inso_dumper/logging_setup.py",
+              "tests/unit/test_config.py",
+              "tests/unit/test_paths.py",
+              "tests/unit/test_logging_setup.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Config",
+              "requirement": "typed settings surface (spec Config surface); pure data",
+              "consumers": [
+                "HttpxClient",
+                "login shell",
+                "children shell (later)"
+              ]
+            },
+            {
+              "name": "load_config",
+              "requirement": "deterministic config assembly with INSO_DUMPER_CONFIG env override; shell",
+              "consumers": [
+                "cli.py (later)"
+              ]
+            },
+            {
+              "name": "TokenRedactingFilter",
+              "requirement": "PRD NFR 'log redacts tokens'; logger-level",
+              "consumers": [
+                "every log call in the codebase"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "default config matches the spec's defaults",
+              "missing file yields Ok(defaults)",
+              "INSO_DUMPER_CONFIG env override picks a custom file",
+              "bad TOML returns Err(CliError(CONFIG, 'config_parse'))",
+              "load_config never raises",
+              "paths.state_dir() and paths.config_file() are pure (deterministic per inputs)",
+              "TokenRedactingFilter strips PHPSESSID=... and password=... substrings from a log record's msg",
+              "filter is a no-op for unrelated strings"
+            ],
+            "acceptance": [
+              "load_config() is the only call site that reads env or files",
+              "all paths deterministic across runs",
+              "Config rejects unknown fields"
+            ]
+          }
+        },
+        {
+          "id": "T4",
+          "name": "Session model and SessionStore",
+          "depends_on": ["T2", "T3"],
+          "inputs": [
+            "spec Domain model (Session)",
+            "spec Data Model section",
+            "docs/api-notes.md Auth model and Session model (spec revision)",
+            "AGENTS.md Functional core / imperative shell rule (model is core, store is shell)"
+          ],
+          "description": "src/inso_dumper/models/__init__.py plus models/session.py define the Session pydantic model: schema_version: Literal[1] = 1, phpsessid: str, user_uuid: str, expires_at: datetime | None = None, extra='forbid'. Pure data; no IO. src/inso_dumper/session/store.py provides the shell functions load_session(path: Path) -> CliResult[Session] and save_session(path: Path, session: Session) -> CliResult[None]. The save path writes to path.tmp (0600), os.replace's, and os.chmod's to 0o600; load reads, parses, validates, and tightens file mode if it was relaxed. FC/IS discipline: the store returns CONFIG for schema_version mismatch and for unparseable JSON — these are configuration outcomes, not session-state outcomes. The store does not map 'file not found' to a CliError; a missing file is a state the caller interprets, and the shell in T8 (not the store) is the only place that turns a missing file into SESSION_EXPIRED for the user. The store's Err surface is CONFIG only. Add a maybe_load_session(path) -> CliResult[Session | None] companion so the T8 shell can distinguish 'no file' from 'config error' cleanly.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/models/__init__.py",
+              "src/inso_dumper/models/session.py",
+              "src/inso_dumper/session/__init__.py",
+              "src/inso_dumper/session/store.py",
+              "tests/unit/test_models_session.py",
+              "tests/unit/test_session_store.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Session",
+              "requirement": "persistence of PHPSESSID and the post-login user UUID (spec Data Model); core",
+              "consumers": [
+                "HttpxClient (later)",
+                "login shell",
+                "children shell"
+              ]
+            },
+            {
+              "name": "load_session, save_session, maybe_load_session",
+              "requirement": "crash-safe 0600 JSON with schema-version gate; shell",
+              "consumers": [
+                "login shell (later)",
+                "ensure_session_loaded (later)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "round-trip save/load yields the same model",
+              "schema_version=2 input returns Err(CliError(kind=CONFIG, subject='session_schema'))",
+              "file written with mode 0o644 is re-tightened to 0o600 on load",
+              "missing file via maybe_load_session returns Ok(None)",
+              "atomic write leaves no session.json.tmp after success even on simulated crash (monkey-patch os.replace to raise once)"
+            ],
+            "acceptance": [
+              "Session rejects unknown fields",
+              "the store never raises — every failure is a Result",
+              "0600 is the only mode the file ever has on disk",
+              "the store's Err surface is exactly {CONFIG}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "HTTP transport and pure parsers",
+      "tasks": [
+        {
+          "id": "T5",
+          "name": "HttpClient Protocol, Response, and HttpxClient returning CliResult[Response]",
+          "depends_on": ["T2", "T3"],
+          "inputs": [
+            "spec Cloudflare verification section",
+            "spec Why a Protocol for HttpClient",
+            "docs/api-notes.md Cloudflare bot management (the verification result)",
+            "AGENTS.md Functional core / imperative shell rule (Protocol and Response are core, HttpxClient is shell)"
+          ],
+          "description": "src/inso_dumper/http/client.py defines BROWSER_LIKE_HEADERS (the exact dict from the spec: User-Agent, Accept, Accept-Language: pl-PL, Accept-Encoding, sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform, Upgrade-Insecure-Requests) as a module-level Mapping[str, str] with MappingProxyType to enforce immutability at runtime. Define the HttpClient Protocol (async def request(method, path, *, form=None, headers=None) -> CliResult[Response]) — the Protocol's return type is CliResult[Response], not raw Response, so the contract says what the shell really delivers. Define a @dataclass(frozen=True, slots=True) class Response (status: int, body: bytes, headers: Sequence[tuple[str, str]] preserving duplicate Set-Cookie entries, text() returning the decoded body) — pure data. Implement HttpxClient(Config) whose request merges BROWSER_LIKE_HEADERS with caller headers, applies the per-host rate limit, sends the request, and on any httpx.HTTPError / OSError returns Err(CliError(HTTP, subject=...)) immediately. A non-2xx status is not an error at this layer — it's a Response(status=4xx, ...) that the caller (parser or shell) interprets. The v1 client does not follow redirects automatically so the login's 302 chain is observable by the caller; the shell's login function (T7) follows them. There is no HttpxClientError exception type — the boundary is Result, not raise-then-catch.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/http/__init__.py",
+              "src/inso_dumper/http/client.py",
+              "tests/unit/test_http_client.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "HttpClient",
+              "requirement": "a swappable transport (spec Why a Protocol); core",
+              "consumers": [
+                "auth.login shell",
+                "children.list_children shell (later)"
+              ]
+            },
+            {
+              "name": "Response",
+              "requirement": "opaque transport-agnostic response wrapper that preserves duplicate headers; core",
+              "consumers": [
+                "parsers in http/auth.py",
+                "parsers in http/children.py"
+              ]
+            },
+            {
+              "name": "BROWSER_LIKE_HEADERS",
+              "requirement": "Cloudflare mitigation, verified by the spike (spec Cloudflare verification); core constant",
+              "consumers": [
+                "every outbound request"
+              ]
+            },
+            {
+              "name": "HttpxClient",
+              "requirement": "the v1 production transport (spec Cloudflare verification); shell",
+              "consumers": [
+                "cli.py (later)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "BROWSER_LIKE_HEADERS is wrapped in MappingProxyType (mutating raises TypeError)",
+              "every required key is present (User-Agent, Accept-Language: pl-PL, sec-ch-ua*, Upgrade-Insecure-Requests)",
+              "a recorded-response test replays the spike's login 302 against an httpx mock and asserts the merged header set was sent",
+              "an injected httpx.ConnectError returns Err(CliError(HTTP, subject='connect')) (not a raised exception)",
+              "an injected 403 from the mock surfaces as Response(status=403, ...) wrapped in Ok(...) — the HTTP layer does not classify 403 as a transport error"
+            ],
+            "acceptance": [
+              "HttpxClient.request is the only call site that opens a socket",
+              "the Protocol can be reimplemented in tests via an in-memory FakeClient returning Ok(Response(...))",
+              "basedpyright reports 0 errors against HttpClient protocol usages",
+              "no 'raise' statement exists in HttpxClient"
+            ]
+          }
+        },
+        {
+          "id": "T6",
+          "name": "Child model and pure children parser",
+          "depends_on": ["T2", "T5"],
+          "inputs": [
+            "spec Domain model (Child)",
+            "docs/api-notes.md Sidebar markup that exposes children",
+            "AGENTS.md Functional core / imperative shell rule (model and parser are core)"
+          ],
+          "description": "src/inso_dumper/models/children.py defines the Child @dataclass(frozen=True, slots=True) with the spec's fields (child_id, first_name, last_name, group: str | None, avatar_color, initials) and the slug property (firstname only when last_name is empty, else firstname-<initial> of last name, ASCII-folded, hyphenated, fallback 'child'). Pure data. src/inso_dumper/http/children.py provides parse_children_list(html: str) -> CliResult[list[Child]], a pure function that locates the <el-menu id='menu-0'> block (regex on the attribute) and extracts each <a href='https://app.inso.pl/panel/home/<uuid>/?'>...<span>NAME</span>...</a> child entry. Use html.parser.HTMLParser from the standard library (no BeautifulSoup dependency). FC/IS discipline: 'menu block missing or unparseable' returns Err(CliError(kind=PLATFORM_CHANGED, subject='children_list')). An empty <el-menu> (no <a> children) is Ok([]) — that's a valid user state, not a parser failure. The shell (T8) interprets Ok([]) for presentation; it does not convert it to an error.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/models/children.py",
+              "src/inso_dumper/http/children.py",
+              "tests/unit/test_models_children.py",
+              "tests/unit/test_http_children.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Child",
+              "requirement": "typed per-child identity with stable slug (spec Domain model); core",
+              "consumers": [
+                "list_children shell (later)",
+                "future announcements-and-dedup spec"
+              ]
+            },
+            {
+              "name": "parse_children_list",
+              "requirement": "HTML -> list[Child] without IO (spec Where business logic lives); core",
+              "consumers": [
+                "list_children shell (later)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "Child.slug produces expected strings for ASCII-folded Polish names, hyphens collapse, empty last_name yields just the first name",
+              "parse_children_list extracts the spike's two-children markup (recorded in a fixture from docs/api-notes/har/spike-2026-08-29.har) into two Child records",
+              "missing menu block returns the PLATFORM_CHANGED error",
+              "an empty <el-menu>...</el-menu> returns Ok([]) (not an error)",
+              "non-Inso <a> hrefs in the menu are ignored",
+              "initials and avatar_color are recovered from the inline style and avatar span"
+            ],
+            "acceptance": [
+              "parse_children_list is called only with already-fetched bytes (the shell pulls Response.text and passes the string in)",
+              "the function is fully covered by table-driven tests over the spike's recorded HTML",
+              "no httpx import in http/children.py"
+            ]
+          }
+        },
+        {
+          "id": "T7",
+          "name": "Pure login payload + response parser, and the login shell",
+          "depends_on": ["T4", "T5", "T6"],
+          "inputs": [
+            "spec API Design (login command)",
+            "docs/api-notes.md Auth model and the spike's login HAR (entry 41: form-encoded body, 302 response with Set-Cookie: PHPSESSID=...)",
+            "AGENTS.md Functional core / imperative shell rule (parser is core, shell is shell)"
+          ],
+          "description": "src/inso_dumper/http/auth.py provides two pure functions: build_login_payload(email: str, password: str) -> Mapping[str, str] returning {'_username': email, '_password': password}, and parse_login_response(response: Response) -> CliResult[Session] that takes the final Response from the redirect chain (the shell chose where to stop) and extracts Set-Cookie: PHPSESSID=<opaque>; ... from response.headers (a Sequence[tuple[str, str]] so duplicate Set-Cookie entries are preserved) and the user_uuid from the response's URL (or, if the shell didn't capture it, the parser accepts a final_url: str parameter as a fallback). Missing PHPSESSID or missing UUID returns Err(CliError(kind=AUTH, subject=...)). The shell function login(client: HttpClient, config: Config, email: str, password: str) -> CliResult[Session] lives in src/inso_dumper/http/login.py: GET /login (warm-up), POST /login with the payload, follow redirects until the URL matches /panel/home/<uuid>/ or the chain length exceeds a small cap (5 hops), call parse_login_response on the final response, return the result. The shell never raises; any CliResult[Response, CliError] returned by client.request is chained via match (with case Ok(r): continue; case Err(e): return Err(e)) so the shell's return type is the propagated CliResult[Session]. The single try/except in this module catches httpx.HTTPError / OSError and converts to Err(CliError(HTTP, subject)) immediately per the AGENTS.md rule.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/http/auth.py",
+              "src/inso_dumper/http/login.py",
+              "tests/unit/test_http_auth.py",
+              "tests/unit/test_http_login.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "build_login_payload",
+              "requirement": "pure form-payload construction (spec Login payload construction); core",
+              "consumers": [
+                "login shell"
+              ]
+            },
+            {
+              "name": "parse_login_response",
+              "requirement": "pure Response -> Session (spec Login response -> Session); core",
+              "consumers": [
+                "login shell"
+              ]
+            },
+            {
+              "name": "login",
+              "requirement": "orchestrate GET warm-up + POST + redirect follow + parse (spec How it works end-to-end); shell",
+              "consumers": [
+                "cli.py (later)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "build_login_payload produces the exact form keys the spike captured",
+              "parse_login_response succeeds on a Response whose headers contain Set-Cookie: PHPSESSID=d9f828d2629433b8d1b9690a17d477e3; ... and whose URL ends in /panel/home/eea48660-3740-11ed-a611-06dd2728d782/, returning Session(phpsessid='d9f8...', user_uuid='eea48660-...')",
+              "a Response missing PHPSESSID returns Err(AUTH, 'missing_phpsessid')",
+              "a Response whose URL is not under /panel/home/<uuid>/ returns Err(AUTH, 'no_user_uuid')",
+              "the login shell against a FakeClient returning the recorded sequence (200 GET /login, 302 POST /login, 302 GET /panel/, 200 GET /panel/home/<uuid>/) returns the expected Session and never raises",
+              "an injected Err(HTTP, ...) from the client short-circuits the shell with the same Err"
+            ],
+            "acceptance": [
+              "parsers and shell are 100% covered by unit tests using the spike's HAR fixtures as golden data",
+              "login is async, callable via asyncio.run",
+              "no try/except outside the single httpx.HTTPError / OSError handler in the shell"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "name": "children command, CLI wiring, end-to-end check",
+      "tasks": [
+        {
+          "id": "T8",
+          "name": "list_children shell function and children command",
+          "depends_on": ["T4", "T6", "T7"],
+          "inputs": [
+            "spec API Design (children command)",
+            "docs/api-notes.md Children endpoint and the spike's recorded dashboard HTML",
+            "T4's load_session / maybe_load_session",
+            "T5's HttpClient Protocol",
+            "T6's parse_children_list",
+            "AGENTS.md Functional core / imperative shell rule (the shell is the only place that interprets empty/missing session state)"
+          ],
+          "description": "src/inso_dumper/http/children_shell.py provides list_children(client: HttpClient, config: Config, session: Session) -> CliResult[list[Child]]: GET /panel/home/<session.user_uuid>/, call parse_children_list(html), return the result. src/inso_dumper/http/session_expiry.py provides ensure_session_loaded(path: Path) -> CliResult[Session] — this is the only place in the codebase that maps a missing session.json (via maybe_load_session) to Err(CliError(kind=SESSION_EXPIRED, subject='session_missing')). The function's contract is: Ok(session) if a valid session exists, Err(SESSION_EXPIRED) if no file or file is unparseable, Err(CONFIG) if the schema is wrong. The typer command children (in src/inso_dumper/cli.py, the file created in T9) orchestrates: load config, call ensure_session_loaded, on Ok(session) build HttpxClient and call list_children, render with rich (Slug | Name | Group columns) or print JSON if --json is passed, return the appropriate exit code. An Ok([]) from list_children is rendered as a friendly 'no children' message — not an error.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/http/children_shell.py",
+              "src/inso_dumper/http/session_expiry.py",
+              "tests/unit/test_http_children_shell.py",
+              "tests/unit/test_session_expiry.py",
+              "tests/integration/test_cli_children.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "list_children",
+              "requirement": "orchestrate authenticated GET + parse (spec How it works end-to-end); shell",
+              "consumers": [
+                "the children typer command"
+              ]
+            },
+            {
+              "name": "ensure_session_loaded",
+              "requirement": "convert missing/invalid Session into the user-facing SESSION_EXPIRED error at the CLI edge (spec API Design); shell",
+              "consumers": [
+                "children command",
+                "every authenticated command (later)"
+              ]
+            },
+            {
+              "name": "maybe_load_session",
+              "requirement": "distinguish 'no file' from 'config error' cleanly (T4 store companion); shell",
+              "consumers": [
+                "ensure_session_loaded"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "list_children against a FakeClient returning the spike's recorded dashboard HTML returns the two children from the spike",
+              "an Ok([]) from the parser renders as 'no children' (no error code)",
+              "an injected Err(SESSION_EXPIRED) from ensure_session_loaded short-circuits the CLI command with exit 4",
+              "ensure_session_loaded against a missing file returns SESSION_EXPIRED",
+              "ensure_session_loaded against a schema_version=2 file returns CONFIG",
+              "CLI integration test runs 'inso-dumper children --json' with a stubbed HttpClient and tmp_path session, asserts the JSON output matches the spike's children and exits 0"
+            ],
+            "acceptance": [
+              "the spike's recorded HTML, replayed through the parsers, round-trips into the expected Child list",
+              "the CLI test exits 0 with the expected output",
+              "SESSION_EXPIRED is emitted from exactly one place (ensure_session_loaded)"
+            ]
+          }
+        },
+        {
+          "id": "T9",
+          "name": "typer app, exit-code dispatcher, README, and the Phase 1 plan.md check",
+          "depends_on": ["T3", "T7", "T8"],
+          "inputs": [
+            "spec API Design (full CLI surface)",
+            "spec Error handling approach (the exit_code_for sketch)",
+            "AGENTS.md Functional core / imperative shell rule (the single outer try/except rule)",
+            "plan.md Phase 1 check"
+          ],
+          "description": "src/inso_dumper/cli.py defines the typer app: login (read INSO_EMAIL / INSO_PASSWORD, build HttpxClient, call login shell from T7, save_session), children (orchestrate T8), --version (from pyproject.toml via importlib.metadata.version), --help. The exit_code_for function from the spec is implemented and used by both commands to map the final CliError to the documented exit code via match + assert_never. The single outer try/except Exception in cli.py is the last-resort safety net: it catches anything that escaped the result-typed boundary (programmer error, library bug), logs at ERROR via the redaction filter, and returns exit 99 (INTERNAL). This is the only place an uncaught Exception is allowed, and AGENTS.md names it explicitly. src/inso_dumper/__main__.py re-exports the typer app for 'python -m inso_dumper'. The validate entry from python-build-tools (ruff format --check, ruff check, basedpyright, pytest -q) must pass before declaring T9 done. A short README.md documents the two commands, the env vars, the session file location, and the exit codes.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/cli.py",
+              "src/inso_dumper/__main__.py",
+              "README.md"
+            ],
+            "modify": [
+              "pyproject.toml"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "full tests/integration/test_cli.py exercises login (with a FakeClient returning a 302 + Set-Cookie) and children (with a FakeClient returning the spike's dashboard HTML)",
+              "asserts exit codes 0/2/3/4/5/6/99 via subprocess",
+              "the dispatcher test enumerates every CliErrorKind and asserts the documented exit code",
+              "the test for the INTERNAL (99) exit asserts that a RuntimeError raised inside a shell becomes a logged error and the documented exit code, not an uncaught exception that aborts the process"
+            ],
+            "acceptance": [
+              "'uv run ruff format --check .' passes",
+              "'uv run ruff check .' passes",
+              "'uv run basedpyright' reports 0 errors",
+              "'uv run pytest -q' passes",
+              "'uv run inso-dumper --help' shows both commands",
+              "'uv run inso-dumper --version' prints the package version",
+              "the plan.md Phase 1 check is satisfied by this task's acceptance — the foundation spec is done"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
