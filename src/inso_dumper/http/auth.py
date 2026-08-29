@@ -11,6 +11,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
+from pydantic import ValidationError
+
 from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.client import Response
@@ -69,7 +71,11 @@ def parse_login_response(response: Response, *, final_url: str) -> CliResult[Ses
     ``inso_dumper.http.login`` tracks this.
 
     Returns ``Err(AUTH)`` if PHPSESSID is missing or the user UUID
-    cannot be extracted from the final URL.
+    cannot be extracted from the final URL. A pydantic ValidationError
+    on the constructed Session is bucketed as ``AUTH`` (the cookie
+    is the user input; bad shape is the user / server's fault, not
+    ours) — any other exception propagates to the CLI's last-resort
+    catch as INTERNAL.
     """
     sid = _extract_phpsessid(response.headers)
     if sid is None:
@@ -79,7 +85,7 @@ def parse_login_response(response: Response, *, final_url: str) -> CliResult[Ses
         return Err(CliError(kind=CliErrorKind.AUTH, subject="no_user_uuid"))
     try:
         session = Session(phpsessid=sid, user_uuid=uuid)
-    except Exception:
+    except ValidationError:
         return Err(CliError(kind=CliErrorKind.AUTH, subject="invalid_session"))
     return Ok(session)
 

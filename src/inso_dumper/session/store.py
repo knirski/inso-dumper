@@ -13,9 +13,12 @@ This module is the only place that touches the session file on disk.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
@@ -25,8 +28,6 @@ _FILE_MODE = 0o600
 
 
 def _tighten_mode(path: Path) -> None:
-    import contextlib
-
     with contextlib.suppress(OSError):
         # Best-effort; if the filesystem does not support chmod the loader
         # still returns the parsed session.
@@ -49,6 +50,10 @@ def save_session(path: Path, session: Session) -> CliResult[None]:
         try:
             data = session.model_dump_json().encode("utf-8")
             os.write(fd, data)
+            # fsync the data so a power-cut between os.write and
+            # os.replace doesn't leave the real file pointing at zero
+            # bytes (forcing an unnecessary re-login).
+            os.fsync(fd)
         finally:
             os.close(fd)
         os.replace(tmp, target)
@@ -71,24 +76,10 @@ def _load_from_path(path: Path) -> CliResult[Session]:
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="session_schema"))
     try:
         session = Session.model_validate(data)
-    except Exception:
+    except ValidationError:
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="session_schema"))
     _tighten_mode(path)
     return Ok(session)
-
-
-def load_session(path: Path) -> CliResult[Session]:
-    """Load and validate the session file at ``path``.
-
-    Returns ``Err(CONFIG, session_schema)`` if the file is missing,
-    unparseable, or has a different ``schema_version``. A missing file
-    is intentionally bucketed as CONFIG (not SESSION_EXPIRED) — the
-    CLI's ``ensure_session_loaded`` helper uses ``maybe_load_session``
-    instead and translates "no file" to SESSION_EXPIRED.
-    """
-    if not path.is_file():
-        return Err(CliError(kind=CliErrorKind.CONFIG, subject="session_schema"))
-    return _load_from_path(path)
 
 
 def maybe_load_session(path: Path) -> CliResult[Session | None]:
@@ -106,7 +97,6 @@ def maybe_load_session(path: Path) -> CliResult[Session | None]:
 
 
 __all__ = [
-    "load_session",
     "maybe_load_session",
     "save_session",
 ]

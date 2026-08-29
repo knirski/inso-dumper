@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, HttpUrl
+from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind
@@ -46,12 +46,30 @@ def load_config(path: Path | None = None) -> Ok[Config] | Err[CliError]:
 
     A missing config file is not an error: defaults are the missing-file
     case. A present-but-unparseable file is a ``CONFIG`` error.
+
+    Two distinct error subjects are reported:
+
+    - ``config_io`` — the file is present but cannot be opened (rare;
+      the loader runs as the current user, which usually has read perms
+      on its own config dir).
+    - ``config_parse`` — the TOML cannot be decoded.
+    - ``config_schema`` — the decoded dict has fields Config rejects
+      (unknown keys, wrong types).
     """
     target = path if path is not None else config_file()
     try:
         raw = _read_toml(target)
-    except OSError, tomllib.TOMLDecodeError:
+    except OSError:
+        return Err(CliError(kind=CliErrorKind.CONFIG, subject="config_io"))
+    except tomllib.TOMLDecodeError:
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="config_parse"))
+    if raw is None:
+        return Ok(Config())
+    try:
+        return Ok(Config(**raw))
+    except ValidationError:
+        return Err(CliError(kind=CliErrorKind.CONFIG, subject="config_schema"))
+
     if raw is None:
         return Ok(Config())
     try:

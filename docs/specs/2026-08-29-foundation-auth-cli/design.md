@@ -315,7 +315,7 @@ class HttpClient(Protocol):
 class Response:
     status: int
     body: bytes
-    headers: Mapping[str, str]
+    headers: Sequence[tuple[str, str]]  # Sequence to preserve duplicate Set-Cookie entries
     def text(self) -> str: ...
 ```
 
@@ -425,10 +425,13 @@ Loggers:
 - `inso_dumper.session` — load/save events; never logs tokens.
 - `inso_dumper.cli` — command entry/exit.
 
-A `TokenRedactingFilter` is installed at root and scrubs anything matching
-`(?i)(token|cookie|set-cookie|password|secret)=?` values from log records.
-This is the "log redacts tokens" PRD NFR — done at the logger boundary so
-individual call sites cannot forget.
+A `TokenRedactingFilter` is installed on the root logger (not on a
+single handler) so every handler that emits through root sees redacted
+records. It scrubs anything matching `(?i)(token|cookie|set-cookie|password|secret)=?`
+values from record messages, percent-substituted args, **and** the
+formatted exception traceback (`record.exc_text`). This is the
+"log redacts tokens" PRD NFR — done at the logger boundary so individual
+call sites cannot forget.
 
 ### Error handling approach
 

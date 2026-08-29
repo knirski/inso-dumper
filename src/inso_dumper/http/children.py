@@ -13,7 +13,6 @@ from html.parser import HTMLParser
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
-from inso_dumper.http.client import Response
 from inso_dumper.models.children import Child
 
 _MENU_ID = "menu-0"
@@ -153,9 +152,4 @@ def parse_children_list(html: str) -> CliResult[list[Child]]:
     return Ok(parser.children)
 
 
-def parse_children_from_response(response: Response) -> CliResult[list[Child]]:
-    """Convenience: extract the body text and delegate to ``parse_children_list``."""
-    return parse_children_list(response.text())
-
-
-__all__ = ["parse_children_from_response", "parse_children_list"]
+__all__ = ["parse_children_list"]

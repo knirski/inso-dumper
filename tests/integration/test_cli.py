@@ -1,4 +1,8 @@
-"""Integration tests for the CLI: subprocess invocations of inso-dumper."""
+"""Integration tests for the CLI surface using ``typer.testing.CliRunner``.
+
+The runner drives the typer app in-process (no subprocess). Subprocess-
+based smoke tests would belong in a separate file added when needed.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,14 @@ from typing import Any
 import pytest
 import typer.testing
 
+from inso_dumper import cli as cli_mod
 from inso_dumper._result import Ok
 from inso_dumper.cli import app, exit_code_for
+from inso_dumper.config import Config
 from inso_dumper.errors import CliError, CliErrorKind
+from inso_dumper.models.children import Child
+from inso_dumper.session import store as session_store
+from tests.conftest import SPIKE_USER_UUID, make_session
 
 
 @pytest.fixture
@@ -29,9 +38,15 @@ def test_help_exits_zero(cli_runner: typer.testing.CliRunner) -> None:
 def test_version_prints_package_version(cli_runner: typer.testing.CliRunner) -> None:
     result = cli_runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    # The version comes from importlib.metadata; assert at least the
-    # major.minor shape.
     assert "0.1" in result.stdout
+
+
+def test_verbose_flag_accepted(cli_runner: typer.testing.CliRunner) -> None:
+    """The -v / --verbose flag documented in design.md is wired through."""
+    # The flag exists on each command and exits cleanly (children with
+    # no session is exit 4).
+    result = cli_runner.invoke(app, ["children", "-v"])
+    assert result.exit_code in (0, 4)
 
 
 def test_login_missing_env_exits_2(
@@ -51,7 +66,10 @@ def test_children_missing_session_exits_4(
     monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
     result = cli_runner.invoke(app, ["children"])
     assert result.exit_code == 4
-    assert "login" in result.stdout.lower() or "login" in result.stderr.lower()
+    # CliRunner's capture shape varies by typer version; assert at the
+    # most-stable layer (exit code + the error-kind string).
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "session" in combined.lower()
 
 
 def test_exit_code_for_dispatch() -> None:
@@ -68,19 +86,7 @@ def test_children_with_fake_client_renders_json(
     cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end with a stubbed HttpClient and a valid session."""
-
-    from inso_dumper import cli as cli_mod
-    from inso_dumper.config import Config
-    from inso_dumper.models.children import Child
-    from inso_dumper.models.session import Session
-    from inso_dumper.session import store as session_store
-
-    # Set up a valid session file.
-    session = Session(
-        phpsessid="d9f828d2629433b8d1b9690a17d477e3",
-        user_uuid="eea48660-3740-11ed-a611-06dd2728d782",
-    )
-    # XDG_STATE_HOME/<name>/session.json — the spec's directory layout.
+    session = make_session()
     session_dir = tmp_path / "inso-dumper"
     session_dir.mkdir(parents=True, exist_ok=True)
     session_path = session_dir / "session.json"
@@ -90,9 +96,7 @@ def test_children_with_fake_client_renders_json(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
 
-    # Stub the list_children shell on the cli module's alias so the
-    # CLI's reference is the patched one.
-    async def fake_list_children(client: Any, config: Config, session: Session) -> Ok[list[Child]]:
+    async def fake_list_children(client: Any, config: Config, session: Any) -> Ok[list[Child]]:
         return Ok(
             [
                 Child(
@@ -117,7 +121,7 @@ def test_children_with_fake_client_renders_json(
     monkeypatch.setattr(cli_mod, "list_children_shell", fake_list_children)
 
     result = cli_runner.invoke(app, ["children", "--json"])
-    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
     payload = json.loads(result.stdout)
     assert isinstance(payload, list)
     assert len(payload) == 2
@@ -127,39 +131,29 @@ def test_children_with_fake_client_renders_json(
 
 
 def test_internal_exit_code_on_unexpected_exception(
-    cli_runner: typer.testing.CliRunner, monkeypatch: pytest.MonkeyPatch
+    cli_runner: typer.testing.CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A RuntimeError that escapes the result boundary is caught and returns 99."""
-
-    from inso_dumper import cli as cli_mod
+    from inso_dumper.models.session import Session
 
     async def boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("simulated programmer error")
 
     monkeypatch.setattr(cli_mod, "list_children_shell", boom)
-    # Bypass session loading so the error originates in list_children.
     monkeypatch.setattr(
         cli_mod,
         "ensure_session_loaded",
-        lambda path: Ok(
-            __import__("inso_dumper.models.session", fromlist=["Session"]).Session(
-                phpsessid="x", user_uuid="y"
-            )
-        ),
+        lambda path: Ok(Session(phpsessid="x", user_uuid=SPIKE_USER_UUID)),
     )
 
-    # Need a real session file in the right place.
-    import tempfile
-
-    from inso_dumper.models.session import Session as _Session
-    from inso_dumper.session import store as _store
-
-    with tempfile.TemporaryDirectory() as td:
-        session_dir = Path(td) / "inso-dumper"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        _store.save_session(session_dir / "session.json", _Session(phpsessid="x", user_uuid="y"))
-        monkeypatch.setenv("XDG_STATE_HOME", str(Path(td)))
-        monkeypatch.setenv("HOME", str(Path(td)))
-        monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
-        result = cli_runner.invoke(app, ["children"])
+    session_dir = tmp_path / "inso-dumper"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_store.save_session(
+        session_dir / "session.json",
+        Session(phpsessid="x", user_uuid=SPIKE_USER_UUID),
+    )
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
+    result = cli_runner.invoke(app, ["children"])
     assert result.exit_code == 99

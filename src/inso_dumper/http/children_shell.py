@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import Config
-from inso_dumper.errors import CliErrorKind, CliResult
+from inso_dumper.errors import CliResult
 from inso_dumper.http.children import parse_children_list
 from inso_dumper.http.client import HttpClient
 from inso_dumper.models.children import Child
@@ -19,16 +19,15 @@ async def list_children(
     A successful fetch that yields an empty menu is ``Ok([])`` — that
     is a valid user state, not a parser failure. ``Err(PLATFORM_CHANGED)``
     is reserved for the parser being unable to find the menu at all.
+
+    The shell returns the client's Err unchanged; no translation happens
+    at this layer. Mapping Err kinds to exit codes is the CLI's job.
     """
     path = f"/panel/home/{session.user_uuid}/"
     headers = {"Cookie": f"PHPSESSID={session.phpsessid}"}
     result = await client.request("GET", path, headers=headers)
     match result:
         case Err(error):
-            # Map the HTTP kind explicitly to keep the public contract;
-            # pass through other Err kinds unchanged.
-            if error.kind is CliErrorKind.HTTP:
-                return Err(error)
             return Err(error)
         case Ok(response):
             return parse_children_list(response.text())

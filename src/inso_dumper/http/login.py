@@ -13,7 +13,7 @@ Contract:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import Config
@@ -23,8 +23,27 @@ from inso_dumper.http.client import HttpClient, Response
 from inso_dumper.models.session import Session
 
 # Maximum number of redirects to follow before giving up. The spike's
-# observed chain is /login -> /panel/ -> /panel/home/<uuid>/, i.e. 2.
+# observed chain is /login -> /panel/ -> /panel/home/<uuid>/, i.e. 2;
+# 5 is a 2.5x safety margin that bounds a redirect-storm DoS in
+# seconds, not unbounded.
 _MAX_REDIRECTS = 5
+
+
+def _is_same_origin(url: str, base: str) -> bool:
+    """True when ``url`` resolves to the same scheme+host+port as ``base``.
+
+    A naive ``startswith(base)`` accepts ``https://app.inso.pl.attacker.tld``
+    as a prefix of ``https://app.inso.pl``; that sends the Cloudflare-
+    fingerprint headers to a host derived from an attacker-supplied
+    string. urlparse compares the parsed netlocs instead.
+    """
+    base_parsed = urlparse(base)
+    url_parsed = urlparse(url)
+    return (
+        url_parsed.scheme == base_parsed.scheme
+        and (url_parsed.hostname or "").lower() == (base_parsed.hostname or "").lower()
+        and (url_parsed.port or base_parsed.port) == (base_parsed.port or url_parsed.port)
+    )
 
 
 async def login(
@@ -39,6 +58,8 @@ async def login(
     2. POST /login with the form payload.
     3. Follow ``Location`` redirects until the URL matches
        ``/panel/home/<uuid>/`` or the chain exceeds ``_MAX_REDIRECTS``.
+       A redirect to a different origin is treated as a server anomaly
+       and surfaces as ``Err(HTTP, off_domain_redirect)``.
     4. Parse the final response for PHPSESSID and the user UUID.
     """
     base = str(config.base_url).rstrip("/")
@@ -77,11 +98,14 @@ async def login(
             break
         # Resolve relative locations against the last URL.
         last_url = urljoin(last_url, location)
-        # Same-host redirects only; if the server sends us off-domain
-        # we treat that as a 200 final and let the parser decide.
-        if not last_url.startswith(base):
-            break
-        path = last_url[len(base) :] or "/"
+        # Off-domain redirect is a server anomaly: return HTTP so the
+        # user is told the platform sent us somewhere unexpected.
+        if not _is_same_origin(last_url, base):
+            return Err(CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect"))
+        # Strip the base prefix; handle the empty case explicitly.
+        path = last_url[len(base) :]
+        if not path:
+            path = "/"
         next_resp = await client.request("GET", path)
         match next_resp:
             case Err(error):
@@ -112,4 +136,4 @@ def _header_value(headers: Sequence[tuple[str, str]], name: str) -> str | None:
     return None
 
 
-__all__ = ["login"]
+__all__ = ["_is_same_origin", "login"]

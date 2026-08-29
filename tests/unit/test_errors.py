@@ -21,19 +21,35 @@ def test_cli_error_kind_is_str_enum() -> None:
     assert isinstance(CliErrorKind.CONFIG, str)
 
 
-def test_cli_error_rejects_unknown_extra_fields() -> None:
+def test_cli_error_rejects_unknown_fields() -> None:
+    """The dataclass-generated __init__ rejects unknown kwargs with TypeError."""
     from typing import Any, cast
 
     with pytest.raises(TypeError):
-        # The custom __init__ on CliError rejects unknown kwargs at runtime.
-        # The cast to Any bypasses basedpyright's static signature check.
-        cast(Any, CliError)(kind=CliErrorKind.AUTH, subject="x", extra="y")
+        # The cast silences basedpyright (which knows the field set) so
+        # the runtime TypeError is exercised.
+        cast(Any, CliError)(kind=CliErrorKind.AUTH, subject="x", bogus="y")
 
 
 def test_cli_error_accepts_known_fields() -> None:
     err = CliError(kind=CliErrorKind.AUTH, subject="missing_phpsessid")
     assert err.kind is CliErrorKind.AUTH
     assert err.subject == "missing_phpsessid"
+
+
+def test_cli_error_default_subject_is_empty() -> None:
+    err = CliError(kind=CliErrorKind.CONFIG)
+    assert err.subject == ""
+
+
+def test_cli_error_is_frozen() -> None:
+    err = CliError(kind=CliErrorKind.HTTP, subject="connect")
+    # Indirect setattr via a generic object handle so the static
+    # checker doesn't flag the line; the frozen dataclass raises
+    # at runtime.
+    target: object = err
+    with pytest.raises((AttributeError, Exception)):
+        setattr(target, "subject", "forged")  # noqa: B010
 
 
 def test_exit_code_dispatch_is_exhaustive() -> None:
@@ -65,7 +81,6 @@ def test_exit_code_dispatch_is_exhaustive() -> None:
 
 
 def test_cli_result_alias_resolves() -> None:
-    # The alias should compose Ok/Err with CliError at the type level.
     ok: CliResult[int] = Ok(1)
     err: CliResult[int] = Err(CliError(kind=CliErrorKind.HTTP, subject="connect"))
     assert isinstance(ok, Ok)

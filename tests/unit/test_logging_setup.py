@@ -92,7 +92,9 @@ def test_filter_scrubs_exception_traceback_text() -> None:
     )
     # Simulate what stdlib does: exc_text holds the formatted traceback,
     # including any exception message that may embed a token.
-    rec.exc_text = "Traceback (most recent call last):\n  ...\nRuntimeError: PHPSESSID=abcdef123 leaked\n"
+    rec.exc_text = (
+        "Traceback (most recent call last):\n  ...\nRuntimeError: PHPSESSID=abcdef123 leaked\n"
+    )
     f.filter(rec)
     assert rec.exc_text is not None
     assert "abcdef123" not in rec.exc_text

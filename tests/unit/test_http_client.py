@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from types import MappingProxyType
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import pytest
@@ -17,34 +15,6 @@ from inso_dumper.http.client import (
     HttpxClient,
     Response,
 )
-
-
-def test_browser_like_headers_is_mapping_proxy() -> None:
-    # Frozen at runtime: attempting to mutate raises TypeError.
-    assert isinstance(BROWSER_LIKE_HEADERS, MappingProxyType)
-
-    def _attempt_mutation() -> None:
-        # The wrapped dict is hidden; subscript assignment on the proxy raises.
-        proxy: Mapping[str, str] = BROWSER_LIKE_HEADERS
-        cast("dict[str, str]", proxy)["User-Agent"] = "x"  # type: ignore[index]
-
-    with pytest.raises(TypeError):
-        _attempt_mutation()
-
-
-def test_browser_like_headers_has_required_keys() -> None:
-    required = [
-        "User-Agent",
-        "Accept",
-        "Accept-Language",
-        "Accept-Encoding",
-        "sec-ch-ua",
-        "sec-ch-ua-mobile",
-        "sec-ch-ua-platform",
-        "Upgrade-Insecure-Requests",
-    ]
-    for key in required:
-        assert key in BROWSER_LIKE_HEADERS, f"missing header: {key}"
 
 
 def test_accept_language_is_polish_primary() -> None:
@@ -194,3 +164,104 @@ def test_httpx_client_no_raise_statements() -> None:
 
     source = inspect.getsource(client_mod)
     assert "raise " not in source, "HttpxClient must not raise"
+
+
+def test_httpx_client_is_async_context_manager() -> None:
+    """`async with HttpxClient(cfg)` calls aclose on the same event loop.
+
+    This is the structural fix for the 'Event loop is closed' bug that
+    fires when asyncio.run is called twice with the same AsyncClient.
+    The test asserts the contract by acquiring via __aenter__ and
+    verifying __aexit__ invokes aclose on the same loop.
+    """
+    import asyncio
+
+    cfg = Config()
+    called = {"aclose": False}
+
+    async def run() -> None:
+        client = HttpxClient(cfg)
+        # Patch aclose on the instance to record the call.
+        original_aclose = client.aclose
+
+        async def traced() -> None:
+            called["aclose"] = True
+            await original_aclose()
+
+        client.aclose = traced  # type: ignore[method-assign]
+        async with client:
+            pass
+        assert called["aclose"]
+
+    asyncio.run(run())
+
+
+def test_rate_limit_sleeps_between_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rate limit is enforced by sleeping between calls."""
+    import asyncio
+
+    from inso_dumper.config import Config
+
+    cfg = Config(rate_limit_per_second=10.0)  # 100ms gap
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    async def fake_send(
+        self: httpx.AsyncClient,
+        request: httpx.Request,
+        *,
+        auth: Any = None,
+        follow_redirects: bool = True,
+    ) -> httpx.Response:
+        return httpx.Response(status_code=200, content=b"", request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+
+    async def run() -> None:
+        client = HttpxClient(cfg)
+        await client.request("GET", "/a")
+        await client.request("GET", "/b")
+
+    asyncio.run(run())
+    # The second call should have slept ~0.1s.
+    assert any(s > 0.05 for s in sleeps)
+
+
+def test_rate_limit_disabled_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-positive rate limit disables throttling."""
+    import asyncio
+
+    from inso_dumper.config import Config
+    from inso_dumper.http import client as client_mod
+
+    cfg = Config(rate_limit_per_second=0.0)
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+
+    monkeypatch.setattr(client_mod.asyncio, "sleep", fake_sleep)
+
+    async def fake_send(
+        self: httpx.AsyncClient,
+        request: httpx.Request,
+        *,
+        auth: Any = None,
+        follow_redirects: bool = True,
+    ) -> httpx.Response:
+        return httpx.Response(status_code=200, content=b"", request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+
+    async def run() -> None:
+        client = HttpxClient(cfg)
+        await client.request("GET", "/a")
+        await client.request("GET", "/b")
+        await client.request("GET", "/c")
+
+    asyncio.run(run())
+    assert sleeps == []

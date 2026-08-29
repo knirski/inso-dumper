@@ -15,9 +15,9 @@ Transport-level failures (httpx.HTTPError, OSError) become
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Protocol
 
 import httpx
@@ -29,21 +29,19 @@ from inso_dumper.errors import CliError, CliErrorKind, CliResult
 # Header set required to pass Cloudflare's bot management front door.
 # Verified by the discovery spike; do not change without re-testing.
 # See docs/api-notes.md "Cloudflare bot management".
-BROWSER_LIKE_HEADERS: Mapping[str, str] = MappingProxyType(
-    {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
-        ),
-        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Not?A_Brand";v="24", "Chromium";v="152"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Linux"',
-        "Upgrade-Insecure-Requests": "1",
-    }
-)
+BROWSER_LIKE_HEADERS: Mapping[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "sec-ch-ua": '"Not?A_Brand";v="24", "Chromium";v="152"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,14 +90,52 @@ class HttpxClient:
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        timeout = httpx.Timeout(config.request_timeout_seconds)
+        self._rate_limit = config.rate_limit_per_second
         # follow_redirects=False so the login shell can observe 302s.
         self._client = httpx.AsyncClient(
             base_url=str(config.base_url).rstrip("/"),
-            timeout=timeout,
+            timeout=httpx.Timeout(config.request_timeout_seconds),
             follow_redirects=False,
             headers=dict(BROWSER_LIKE_HEADERS),
         )
+        # Per-instance rate limiter. _last_request is the monotonic
+        # timestamp of the last successful dispatch; 0.0 means "no
+        # request issued yet." An asyncio.Lock serialises concurrent
+        # calls within the same event loop (the v1 CLI is sync, so
+        # concurrency comes from asyncio.gather in future specs).
+        self._lock = asyncio.Lock()
+        self._last_request = 0.0
+
+    async def __aenter__(self) -> HttpxClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _throttle(self) -> None:
+        """Enforce the configured per-second rate limit.
+
+        The wait is computed from ``_last_request`` and sleeps for the
+        remaining time. ``rate_limit_per_second <= 0`` disables the
+        limit (tests and offline replay).
+        """
+        if self._rate_limit <= 0:
+            return
+        async with self._lock:
+            now = asyncio.get_running_loop().time()
+            gap = 1.0 / self._rate_limit
+            earliest = self._last_request + gap
+            if earliest > now:
+                await asyncio.sleep(earliest - now)
+            self._last_request = now
 
     async def request(
         self,
@@ -109,6 +145,7 @@ class HttpxClient:
         form: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> CliResult[Response]:
+        await self._throttle()
         merged: dict[str, str] = dict(BROWSER_LIKE_HEADERS)
         if headers:
             merged.update(headers)
@@ -127,9 +164,6 @@ class HttpxClient:
         except OSError as exc:
             return Err(_classify_os_error(exc))
         return Ok(_to_response(response))
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
 
 
 def _to_response(response: httpx.Response) -> Response:

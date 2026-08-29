@@ -28,17 +28,14 @@ class CliErrorKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class CliError:
     """A typed CLI error. ``subject`` is a short redacted identifier
-    (e.g. ``"missing_phpsessid"``) safe to log; never include raw tokens."""
+    (e.g. ``"missing_phpsessid"``) safe to log; never include raw tokens.
+
+    The dataclass-generated ``__init__`` already rejects unknown kwargs
+    with ``TypeError``; no custom override is needed.
+    """
 
     kind: CliErrorKind
     subject: str = ""
-
-    def __init__(self, *, kind: CliErrorKind, subject: str = "") -> None:
-        # Explicit __init__ rejects unknown kwargs at construction time.
-        # The decorator above would accept any field declared on the class;
-        # this guards against future fields being added silently.
-        object.__setattr__(self, "kind", kind)
-        object.__setattr__(self, "subject", subject)
 
 
 type CliResult[T] = Result[T, CliError]

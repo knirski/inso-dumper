@@ -17,9 +17,11 @@ that typer's runtime annotation introspection sees real types.
 # ruff: noqa: B008  # typer.Option as default is the documented typer idiom.
 
 import asyncio
+import dataclasses
 import json
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from logging import Logger
 from pathlib import Path
 from typing import Any, NoReturn, assert_never
@@ -28,7 +30,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from inso_dumper._result import Err, Ok
+from inso_dumper._result import Err
 from inso_dumper.config import load_config
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
@@ -50,15 +52,15 @@ app = typer.Typer(
     add_completion=False,
 )
 
-console_err = Console(file=sys.stderr)
-console_out = Console()
+_console_err = Console(file=sys.stderr)
+_console_out = Console()
 
 
 def _version_callback(value: bool) -> None:
     if value:
         from importlib.metadata import version
 
-        console_out.print(version("inso-dumper"))
+        _console_out.print(version("inso-dumper"))
         raise typer.Exit(0)
 
 
@@ -67,7 +69,6 @@ def _root(
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True),
 ) -> None:
     """Global options: --version."""
-    return None
 
 
 def exit_code_for(err: CliError) -> int:
@@ -89,21 +90,30 @@ def exit_code_for(err: CliError) -> int:
             return assert_never(unreachable)
 
 
-def _read_credentials() -> CliResult[tuple[str, str]]:
-    email = os.environ.get("INSO_EMAIL", "")
-    password = os.environ.get("INSO_PASSWORD", "")
-    if not email or not password:
-        return Err(
-            CliError(
-                kind=CliErrorKind.CONFIG,
-                subject="missing_credentials",
-            )
-        )
-    return Ok((email, password))
-
-
 def _format_error(err: CliError) -> str:
     return f"error[{err.kind.value}]: {err.subject}" if err.subject else f"error[{err.kind.value}]"
+
+
+def _die(err: CliError, log: Logger) -> NoReturn:
+    log.error("%s", _format_error(err))
+    _console_err.print(_format_error(err), style="red")
+    raise typer.Exit(exit_code_for(err))
+
+
+def _dispatch(
+    coro_factory: Callable[[], Awaitable[CliResult[Any]]],
+    log: Logger,
+) -> CliResult[Any]:
+    """Run a coroutine in a single asyncio.run with the last-resort catch.
+
+    ``coro_factory`` builds the coroutine so the HttpxClient is constructed
+    inside the event loop (where its async __aenter__ runs).
+    """
+    try:
+        return asyncio.run(coro_factory())
+    except Exception as exc:  # last-resort safety net per AGENTS.md
+        log.exception("command: unexpected exception")
+        return Err(CliError(kind=CliErrorKind.INTERNAL, subject=type(exc).__name__))
 
 
 @app.command()
@@ -111,43 +121,39 @@ def login(
     config_path: Path | None = typer.Option(
         None, "--config", help="Alternate TOML config file path."
     ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
 ) -> NoReturn:
     """Authenticate against the Inso platform and persist the session."""
-    setup_logging(verbose=is_verbose())
+    setup_logging(verbose=verbose or is_verbose())
     log = get_logger("cli")
 
-    cfg_result = load_config(config_path)
-    if isinstance(cfg_result, Err):
-        _die(cfg_result.error, log)
-    cfg = cfg_result.value
-
-    creds = _read_credentials()
-    if isinstance(creds, Err):
-        _die(creds.error, log)
-    email, password = creds.value
-
-    client = HttpxClient(cfg)
-    try:
-        session_result = asyncio.run(login_shell(client, cfg, email, password))
-    except Exception as exc:  # last-resort safety net
-        log.exception("login: unexpected exception")
+    email = os.environ.get("INSO_EMAIL", "")
+    password = os.environ.get("INSO_PASSWORD", "")
+    if not email or not password:
         _die(
-            CliError(kind=CliErrorKind.INTERNAL, subject=type(exc).__name__),
+            CliError(kind=CliErrorKind.CONFIG, subject="missing_credentials"),
             log,
         )
-    finally:
-        asyncio.run(client.aclose())
 
-    if isinstance(session_result, Err):
-        _die(session_result.error, log)
-    session = session_result.value
+    async def _do_login() -> CliResult[Any]:
+        cfg_result = load_config(config_path)
+        if isinstance(cfg_result, Err):
+            return cfg_result
+        cfg = cfg_result.value
+        async with HttpxClient(cfg) as client:
+            return await login_shell(client, cfg, email, password)
+
+    result = _dispatch(_do_login, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    session = result.value
 
     save = save_session(session_file(), session)
     if isinstance(save, Err):
         _die(save.error, log)
 
     log.info("login ok user_uuid=%s", session.user_uuid)
-    console_out.print("OK")
+    _console_out.print("OK")
     raise typer.Exit(0)
 
 
@@ -157,47 +163,40 @@ def children(
         None, "--config", help="Alternate TOML config file path."
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a rich table."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
 ) -> NoReturn:
     """List children on the authenticated account."""
-    setup_logging(verbose=is_verbose())
+    setup_logging(verbose=verbose or is_verbose())
     log = get_logger("cli")
-
-    cfg_result = load_config(config_path)
-    if isinstance(cfg_result, Err):
-        _die(cfg_result.error, log)
-    cfg = cfg_result.value
 
     session_result = ensure_session_loaded(session_file())
     if isinstance(session_result, Err):
         if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
-            console_out.print(
+            _console_err.print(
                 "No saved session. Run `inso-dumper login` first.",
                 style="yellow",
             )
         _die(session_result.error, log)
     session = session_result.value
 
-    client = HttpxClient(cfg)
-    try:
-        children_result = asyncio.run(list_children_shell(client, cfg, session))
-    except Exception as exc:  # last-resort safety net
-        log.exception("children: unexpected exception")
-        _die(
-            CliError(kind=CliErrorKind.INTERNAL, subject=type(exc).__name__),
-            log,
-        )
-    finally:
-        asyncio.run(client.aclose())
+    async def _do_list() -> CliResult[Any]:
+        cfg_result = load_config(config_path)
+        if isinstance(cfg_result, Err):
+            return cfg_result
+        cfg = cfg_result.value
+        async with HttpxClient(cfg) as client:
+            return await list_children_shell(client, cfg, session)
 
-    if isinstance(children_result, Err):
-        _die(children_result.error, log)
-    kids = children_result.value
+    result = _dispatch(_do_list, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    kids = result.value
 
     if as_json:
-        console_out.print(json.dumps([_child_to_dict(c) for c in kids], indent=2))
+        _console_out.print(json.dumps([_child_to_dict(c) for c in kids], indent=2))
     else:
         if not kids:
-            console_out.print("No children on this account.")
+            _console_out.print("No children on this account.")
         else:
             table = Table(title="Children")
             table.add_column("Slug", style="cyan")
@@ -205,24 +204,13 @@ def children(
             table.add_column("Group", style="dim")
             for c in kids:
                 table.add_row(c.slug, c.display_name, c.group or "-")
-            console_out.print(table)
+            _console_out.print(table)
     raise typer.Exit(0)
 
 
 def _child_to_dict(c: Any) -> dict[str, Any]:
-    return {
-        "child_id": c.child_id,
-        "first_name": c.first_name,
-        "last_name": c.last_name,
-        "group": c.group,
-        "avatar_color": c.avatar_color,
-        "initials": c.initials,
-        "slug": c.slug,
-        "display_name": c.display_name,
-    }
-
-
-def _die(err: CliError, log: Logger) -> NoReturn:
-    log.error("%s", _format_error(err))
-    console_err.print(_format_error(err), style="red")
-    raise typer.Exit(exit_code_for(err))
+    """Serialize a Child for --json. Use asdict for the fields, then add
+    the computed properties so the JSON output stays in sync with the
+    dataclass automatically.
+    """
+    return {**dataclasses.asdict(c), "slug": c.slug, "display_name": c.display_name}

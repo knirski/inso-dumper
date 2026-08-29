@@ -70,6 +70,11 @@ def setup_logging(verbose: bool = False) -> None:
     """Configure the root logger with rich-backed stderr output.
 
     Idempotent: calling twice does not double-install handlers.
+    The ``TokenRedactingFilter`` is attached to the root logger so
+    every handler that emits through root (the RichHandler below,
+    or any handler a downstream dependency installs) sees redacted
+    records. Logger-level filters run before handler-level filters
+    and are unconditional.
     """
     root = logging.getLogger()
     # Remove any handlers we previously installed (so tests can call
@@ -77,6 +82,11 @@ def setup_logging(verbose: bool = False) -> None:
     for handler in list(root.handlers):
         if isinstance(handler, RichHandler):
             root.removeHandler(handler)
+    # The filter: also remove our own prior install, so repeated
+    # setup_logging calls don't stack duplicate filters.
+    for f in list(root.filters):
+        if isinstance(f, TokenRedactingFilter):
+            root.removeFilter(f)
 
     level = logging.DEBUG if verbose else logging.INFO
     handler = RichHandler(
@@ -86,8 +96,8 @@ def setup_logging(verbose: bool = False) -> None:
         show_time=False,
         markup=False,
     )
-    handler.addFilter(TokenRedactingFilter())
     root.addHandler(handler)
+    root.addFilter(TokenRedactingFilter())
     root.setLevel(level)
 
 
