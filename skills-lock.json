@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "agent-browser": {
+      "source": "vercel-labs/agent-browser",
+      "sourceType": "github",
+      "skillPath": "skills/agent-browser/SKILL.md",
+      "computedHash": "a674b7d81066e3cc471a7512ddb4ae724418cbfefa75cbb050b0dc430e4d57a0"
+    },
     "atelier-orchestrator": {
       "source": "martinffx/atelier",
       "sourceType": "github",
@@ -71,7 +77,7 @@
       "source": "xpepper/pr-review-agent-skill",
       "sourceType": "github",
       "skillPath": "pr-review-loop/SKILL.md",
-      "computedHash": "7d1c9fb1e19aafefb690f47c903753ca7609fa6e4a9f66fdfc73f2ffa76aee5a"
+      "computedHash": "bdaa3763cd1ab23e8f28ce17266478a4ec92f35f909cf496d905488bce61eb7f"
     },
     "python-build-tools": {
       "source": "martinffx/python-skills",

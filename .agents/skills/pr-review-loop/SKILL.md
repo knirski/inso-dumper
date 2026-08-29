@@ -1,12 +1,12 @@
 ---
 name: pr-review-loop
-description: Use when addressing open PR review comments from any reviewer (human or bot) within the current agent session. For a fresh-context-per-comment approach, use ralph-wiggum-loop instead.
+description: Use when addressing open PR review comments from any reviewer (human or bot). Runs an in-session loop by default; on an explicit `--handoff` request, completes one unit of work per session and stops so the user starts the next. When an external shell loop should drive the sessions instead of the user, use ralph-wiggum-loop.
 license: MIT
 compatibility: Requires gh CLI or any other tool to interact with GitHub. PR branch must be checked out locally.
 metadata:
   author: Pietro Di Bello
-  version: "1.5.0"
-allowed-tools: Bash(gh:*)
+  version: "1.6.0"
+allowed-tools: Bash
 ---
 
 # PR Review Loop
@@ -28,6 +28,23 @@ Users trigger this skill with prompts like:
 
 - `gh` CLI (preferred). If unavailable, fall back to any tool available to interact with GitHub.
 - The PR branch must be checked out locally.
+
+## Mode selection
+
+Use **normal mode** unless the user explicitly requests handoff mode with
+`/pr-review-loop --handoff` or equivalent wording such as "continue the PR
+review in handoff mode."
+
+- **Handoff mode:** Read and follow
+  [references/handoff-mode.md](references/handoff-mode.md) instead of the
+  process below. Handoff mode is experimental and intentionally stops after one
+  clearly named scope so the user can start a fresh session.
+- **Normal mode:** Follow the existing process below unchanged. If
+  `.pr-review/HANDOFF.md` exists, warn once that normal mode may make its state
+  stale, then ignore the file. Do not read, update, or delete it.
+
+Never infer handoff mode merely from the presence of the handoff file. The user
+must select it explicitly in every fresh session.
 
 ## Process
 
@@ -97,11 +114,7 @@ gh api repos/{owner}/{repo}/issues/{pr_number}/comments \
   | jq '[.[] | {id: .id, author: .user.login, body: .body, created_at: .created_at, type: "issue-comment"}]'
 ```
 
-> Before triaging, filter out comments by the PR author because they are not reviewer feedback.
-> Retain feedback from automated reviewers and bots; classify it by substance exactly as human
-> feedback. Exclude automation only when the comment is operational noise rather than review
-> feedback, and record that decision as OUT_OF_SCOPE. The `author` field in the transformed output
-> helps with this.
+> Before triaging, filter out comments by the PR author (they are not reviewer feedback) and known bot accounts. The `author` field in the transformed output helps with this.
 
 Triage items from both lists. Track which type each item is — it affects how you reply (Step 6f) and close (Step 6g).
 
@@ -206,11 +219,6 @@ git commit -m "<conventional commit message describing the fix>
 Addresses PR comment from @<reviewer>."
 git push
 ```
-
-Invoke `loop-on-ci` immediately after each push. Do not reply to or resolve the addressed comment
-until every PR-attached check is green for the pushed commit. If CI fails, let `loop-on-ci`
-diagnose and fix the failure, re-running the full check set after every additional push. Resume this
-step only after `loop-on-ci` reports green CI.
 
 Example commit flow across multiple comments:
 ```bash
@@ -335,9 +343,7 @@ rm .pr-review/plan-<comment-id>.md
 
 ### Step 7 — Stop condition for the processing loop
 
-Stop only when no MUST_FIX or SHOULD_FIX comments remain and all PR-attached checks are green for
-the latest commit. Re-fetch unresolved feedback after each return from `loop-on-ci`; a review bot
-may have added comments for the new commit.
+Stop when no MUST_FIX or SHOULD_FIX comments remain.
 
 If you prefer to batch-resolve all threads at once rather than one by one, you can do so here:
 ```bash
@@ -436,11 +442,7 @@ This skill is designed to be interrupted and restarted in a fresh context at any
 
 On startup:
 1. Run pre-flight (Step 1)
-2. Run `loop-on-ci` if the latest pushed commit is not confirmed green, then re-fetch both review
-   threads and issue comments from GitHub (Step 3) — already-resolved threads won't appear; for
-   issue comments, look for a comment posted *after* the original whose body quotes the original or
-   follows the reply template. This is best-effort and inherently less reliable than the
-   auto-filtered `isResolved` mechanism — if uncertain, re-reading the reply is safer than skipping it
+2. Re-fetch both review threads and issue comments from GitHub (Step 3) — already-resolved threads won't appear; for issue comments, look for a comment posted *after* the original whose body quotes the original or follows the reply template. This is best-effort and inherently less reliable than the auto-filtered `isResolved` mechanism — if uncertain, re-reading the reply is safer than skipping it
 3. Check for an existing `.pr-review/plan-*.md` file — if found, you are mid-fix on that comment; continue from Step 6b
 4. If the previous run was interrupted, verify the latest issue/comment bodies and thread states before continuing (to catch partially posted or malformed remote writes)
 5. Triage remaining comments and continue

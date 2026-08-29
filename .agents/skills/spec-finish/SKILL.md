@@ -19,10 +19,6 @@ Before starting, verify:
 2. Working directory has no unresolved staged or unstaged changes
 3. Tests pass
 
-"Complete" means every task's inline execution status is `completed` with evidence, or every
-tracker-mode task points to a completed tracker record. If any task's execution mode, state, or
-reference is incomplete, return to `spec-implement` before finishing.
-
 If not complete, go back to `spec-implement`.
 
 ---
@@ -35,11 +31,6 @@ machinery that replaces sufficient platform behavior.
 
 If the implementation faithfully follows an unnecessarily large design, stop and return to
 `spec-plan`. Get approval for the smaller plan before continuing.
-
-Removals are safe only when they bring the implementation back to the approved behavior and
-scope. If a removal would change approved behavior or scope, stop before editing the
-implementation and return to `spec-plan` for a smaller approved plan; surface the conflict
-instead of choosing silently, and preserve user changes.
 
 Update the finished SDD to describe the smaller result. Replace rejected architecture in the
 normative design and plan instead of preserving it as precedent; mention it only as a rejected
@@ -126,8 +117,7 @@ show the affected range and ask for separate approval before rebasing.
 ## Step 6: Prepare the PR
 
 Steps 1-5 (simplification, documentation, validation, review, commits) must all be complete
-before proceeding, and the repository's `verification-before-completion` gate must have passed
-on the final state. **If code-review found blocking or scope-changing issues, stop and return
+before proceeding. **If code-review found blocking or scope-changing issues, stop and return
 to spec-implement to fix them. Do not proceed to Step 6b.**
 
 ### Step 6a: Present Completion Summary
@@ -141,7 +131,6 @@ Before creating the PR, present a summary to the human:
 **Tests:** [passed/failed]
 **Type Check:** [passed/failed]
 **Lint:** [passed/failed]
-**Verification:** [verification-before-completion evidence]
 **Review:** [passed/issues found]
 **Commits:** [N commits in stack]
 **Ready for PR:** [yes/no]

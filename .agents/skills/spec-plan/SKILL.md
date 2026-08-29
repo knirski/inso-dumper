@@ -124,11 +124,6 @@ structured `plan.json` when approved.
             "Validation rules (email format, password strength)"
           ],
           "description": "Create UserEntity with email and password fields. Implement validation using a Result type. Password must be hashed, never stored plaintext.",
-          "execution": {
-            "mode": "inline",
-            "status": "pending",
-            "completion": null
-          },
           "files": {
             "reuse": ["src/auth/password.ts"],
             "create": ["src/entities/user.ts", "tests/entities/user.test.ts"],
@@ -189,26 +184,9 @@ structured `plan.json` when approved.
 | depends_on | string[] | Task IDs that must complete first |
 | inputs | string[] | What you need to know before starting |
 | description | string | What to build, key decisions, constraints |
-| execution | Execution | Task execution state and linked GitHub pull requests |
 | files | {reuse, create, modify, delete} | Existing code to reuse, modify, or delete, plus files to create |
 | new_abstractions | {name, requirement, consumers}[] | New abstractions mapped to a present requirement and current consumers |
 | validation | {tests, acceptance} | How to verify the task is done |
-
-Each task carries its own `execution` discriminated union:
-
-- `{"mode": "inline", "status": "pending", "completion": null}` keeps execution state in
-  the task. Status is one of `pending`, `in_progress`, `blocked`, or `completed`. A completed
-  task must include completion date, commit(s), and concrete validation evidence. Whenever
-  status is not `pending`, include `github_prs` as a list of GitHub pull-request URLs; use an
-  empty list when no pull request exists yet.
-- `{"mode": "tracker", "tracker": {"provider": "github", "location": "owner/repo"},
-  "ref": "https://github.com/owner/repo/issues/1", "github_prs": []}` points that task at its
-  external execution record; the tracker owns its live status and the PR list records reviewable
-  implementation work.
-
-Keep task keys in this order: `id`, `name`, `depends_on`, `inputs`, `description`, `execution`,
-`files`, `new_abstractions`, `validation`. Do not include `github_prs` on pending tasks. Do not
-mix modes within a task or infer completion from file presence or commit messages alone.
 
 ---
 
@@ -304,9 +282,6 @@ After creating plan.json, verify:
 - Every task has an ID and depends_on field
 - Dependencies form a valid DAG (no cycles)
 - Every task has inputs, description, and validation
-- Every task has execution metadata in the selected mode, with complete inline state or a tracker
-  reference
-- Every non-pending task has a `github_prs` list, and pending tasks omit it
 - Preserved behavior is short and explicit
 - Every task identifies code to reuse, modify, or delete
 - Every new abstraction names its present requirement and current consumers
