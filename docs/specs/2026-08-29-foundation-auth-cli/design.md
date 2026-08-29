@@ -47,11 +47,14 @@ Everything beyond that (announcements, messages, documents, dedup, indexes,
 
 - All Python invocations go through `uv run …`; no bare `python` / `pip`
   (AGENTS.md).
-- Python ≥ 3.11 per PRD; the toolchain is set up for 3.12+ per the
-  `python-build-tools` skill. Target `requires-python = ">=3.12"` to match
-  modern type syntax and avoid dragging 3.11-only workarounds.
-- Deps (PRD NFRs): `httpx`, `typer`, `rich`, `pydantic`. Dev: `pytest`,
-  `pytest-asyncio`, `ruff`, `basedpyright` (per `python-build-tools`).
+- Python floor: 3.14 (AGENTS.md; PRD NFRs updated in step with this
+  spec). 3.14 unlocks PEP 695 generic syntax without
+  `from __future__ import annotations` shims. Pin via
+  `requires-python = ">=3.14"` and a `.python-version` file.
+- Deps (PRD NFRs + AGENTS.md): `httpx`, `typer`, `rich`, `pydantic`. Dev:
+  `pytest`, `pytest-asyncio`, `ruff`, `basedpyright`. The `Result` type
+  (`Ok`, `Err`) is defined in `inso_dumper._result`; see AGENTS.md
+  "Result type".
 - All Inso traffic is read-only GETs where possible; non-GETs must be
   justified in code and called out in `api-notes.md` (AGENTS.md).
 - Secrets never enter the repo: `INSO_EMAIL` / `INSO_PASSWORD` env vars or
@@ -61,6 +64,11 @@ Everything beyond that (announcements, messages, documents, dedup, indexes,
   derived from it is ever committed (AGENTS.md).
 - The `agent-browser` skill is the authoritative tool for the discovery
   spike (PRD/plan Phase 0).
+- Style: modern, idiomatic, typed, FP-style Python (AGENTS.md "Python
+  style"). Use `Result[ValueT, ErrorT]` at all recoverable failure
+  boundaries, `match`/`case` + `assert_never` for closed unions,
+  `@dataclass(frozen=True, slots=True)` for value objects, and `StrEnum`
+  for closed string sets. basedpyright in `recommended` mode.
 
 ## Context
 
@@ -146,7 +154,7 @@ inso_dumper/
 ├── cli.py                     # typer app, command wiring
 ├── config.py                  # pydantic Settings, TOML+env loader (functional)
 ├── paths.py                   # xdg path resolution (functional)
-├── errors.py                  # exception hierarchy
+├── errors.py                  # closed CliError union (StrEnum kind + dataclass payload)
 ├── logging_setup.py           # rich logging, token redaction
 ├── http/
 │   ├── __init__.py
@@ -359,18 +367,74 @@ individual call sites cannot forget.
 
 ### Error handling approach
 
+The CLI's recoverable error family is a closed union, not an exception
+hierarchy. AGENTS.md mandates `Result[ValueT, ErrorT]` at failure
+boundaries; the CLI is the single dispatcher that maps each variant to
+an exit code.
+
 ```python
-# errors.py
-class InsoDumperError(Exception): ...
-class ConfigError(InsoDumperError): ...        # exit 2
-class AuthError(InsoDumperError): ...          # exit 3
-class SessionExpiredError(InsoDumperError): ...# exit 4
-class HttpError(InsoDumperError): ...          # exit 5
-class PlatformChangedError(InsoDumperError): ...# exit 6 — payload shape drift
+# _result.py — see AGENTS.md "Result type"
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class Ok[ValueT]:
+    value: ValueT
+
+@dataclass(frozen=True, slots=True)
+class Err[ErrorT]:
+    error: ErrorT
+
+type Result[ValueT, ErrorT] = Ok[ValueT] | Err[ErrorT]
 ```
 
-Exit codes are stable and documented in `--help`. The CLI maps each to a
-distinct exit code so a future `systemd` timer (PRD M5) can react.
+```python
+# errors.py
+from enum import StrEnum
+from dataclasses import dataclass
+
+class CliErrorKind(StrEnum):
+    CONFIG = "config"               # exit 2 — bad/missing config or env
+    AUTH = "auth"                   # exit 3 — login rejected
+    SESSION_EXPIRED = "session_expired"  # exit 4 — refresh failed; run `login`
+    HTTP = "http"                   # exit 5 — transport-level failure
+    PLATFORM_CHANGED = "platform_changed"  # exit 6 — payload shape drift
+    INTERNAL = "internal"           # exit 99 — unclassified (should not happen)
+
+@dataclass(frozen=True, slots=True)
+class CliError:
+    kind: CliErrorKind
+    subject: str = ""        # short redacted identifier for logs
+
+type CliResult[T] = Result[T, CliError]
+```
+
+Each call site returns `Result[..., CliError]`. The CLI is the only place
+that dispatches on `kind`:
+
+```python
+# cli.py (sketch)
+def exit_code_for(err: CliError) -> int:
+    match err.kind:
+        case CliErrorKind.CONFIG:           return 2
+        case CliErrorKind.AUTH:             return 3
+        case CliErrorKind.SESSION_EXPIRED:  return 4
+        case CliErrorKind.HTTP:             return 5
+        case CliErrorKind.PLATFORM_CHANGED: return 6
+        case CliErrorKind.INTERNAL:         return 99
+        case _ as unreachable:               return assert_never(unreachable)
+```
+
+Exit codes are stable and documented in `--help`. A future `systemd` timer
+(PRD M5) can react to each one. The `INTERNAL` variant exists for
+unclassified exceptions caught at the top of each command; the spec
+asserts that no path returns it during normal operation, and basedpyright
+flags any missing variant via `assert_never`.
+
+`parse_login_response` and `list_children` are the two pure parsers
+that return `Result[Session, CliError]` and `Result[list[Child], CliError]`
+respectively. Their IO shells (`HttpxClient`, `SessionStore`) catch
+`httpx.HTTPError` / `OSError` and convert them into the relevant
+sanitized `CliError` — those exceptions never escape the boundary.
 
 ## Data Model
 
@@ -393,8 +457,9 @@ spec.
 }
 ```
 
-`schema_version` is checked on load; mismatches raise `ConfigError`. The
-file is written atomically (write to `session.json.tmp`, `os.replace`,
+`schema_version` is checked on load; mismatches return
+`Err(CliError(kind=CONFIG, subject="session_schema"))`. The file is
+written atomically (write to `session.json.tmp`, `os.replace`,
 `chmod 0o600`). On load, file mode is verified; if it has been relaxed
 the loader warns and re-tightens.
 

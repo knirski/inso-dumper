@@ -128,7 +128,7 @@ Options: `--config`, `--dry-run`, `--limit <n>` (testing), `--child <slug>`, `--
 
 ## Non-functional requirements
 
-- Python ≥3.11, project managed with **uv** (`uv` owns venv, deps, and every invocation — all
+- Python ≥3.14, project managed with **uv** (`uv` owns venv, deps, and every invocation — all
   scripts/commands run via `uv run`); deps: `httpx`, `typer`, `rich`, `pydantic`
   (models for API payloads), `sqlite3` (stdlib).
 - Rate limit: default ~2–4 req/s, jittered; per-file retry ×3 with backoff.
