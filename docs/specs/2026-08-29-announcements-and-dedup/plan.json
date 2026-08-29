@@ -1,0 +1,510 @@
+{
+  "feature": "announcements-and-dedup",
+  "spec": "docs/specs/2026-08-29-announcements-and-dedup/design.md",
+  "goal": "Dump every announcement and gallery post for a chosen child into a self-contained, deduplicated filesystem layout, with idempotent re-runs and read-only interaction with the platform.",
+  "preserved_behavior": [
+    "inso-dumper login and inso-dumper children (foundation spec) are unchanged.",
+    "The HttpClient Protocol, HttpxClient transport, BROWSER_LIKE_HEADERS, TokenRedactingFilter on the root logger, the Result/CliError/CliErrorKind machinery, and cli.exit_code_for are all reused as-is.",
+    "The Session schema (schema_version=1, phpsessid, user_uuid) and the session JSON file format are unchanged. The sync command does not modify session.json.",
+    "The Child.slug rule is unchanged; per-post slugs are derived with the same _SLUG_RE and _ascii_fold so a post slug for the same post is identical across runs.",
+    "The CLI exit codes (2/3/4/5/6/99) and their meanings are unchanged. No new exit code is added.",
+    "AGENTS.md rules (uv-only, secrets policy, read-only scraping, no commits of children's data) are honored end-to-end. Signed media URLs are short-lived and never persisted to disk; downloaded bytes are the only durable artefact."
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Domain model: Post, Photo, Attachment, Category",
+      "tasks": [
+        {
+          "id": "T1",
+          "name": "Add Category, Post, Photo, Attachment, Media pydantic models",
+          "depends_on": [],
+          "inputs": [
+            "approved design.md Findings section",
+            "spike JSON at docs/api-notes-data/*.json",
+            "existing models/session.py and models/children.py patterns"
+          ],
+          "description": "Create src/inso_dumper/models/timeline.py with the closed set of pydantic models that mirror the spike's API response. All BaseModels use model_config = ConfigDict(extra='forbid') so an unknown key raises pydantic.ValidationError instead of being silently dropped. The Category enum is IntEnum with ANNOUNCEMENTS = 2, GALLERIES = 3; it owns the api_id integer. Photo.ext and Attachment.ext are @property helpers that derive .jpg|.png|.pdf|... from the original filename with a fallback to the URL path, falling back to .bin. The Post.content field is left as str; the HTML-to-Markdown conversion happens in the writer, not in the model. The Post model adds a dumped_at: datetime | None = None shadow field that the dumper sets at write time and the parser leaves alone on the API path. Module docstring documents the functional-core / no-IO contract.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/models/timeline.py",
+              "tests/unit/test_models_timeline.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Category",
+              "requirement": "closed mirror of the platform's data-categories for the in-scope ids (2, 3)",
+              "consumers": [
+                "http/timeline.py",
+                "cli.py",
+                "dump/sync.py"
+              ]
+            },
+            {
+              "name": "Post",
+              "requirement": "typed mirror of the API item shape so the parser does not pass dict[str, Any] around",
+              "consumers": [
+                "http/timeline.py parser",
+                "dump/writer.py (writes post.json)"
+              ]
+            },
+            {
+              "name": "Photo, Attachment, Media",
+              "requirement": "normalised media shape",
+              "consumers": [
+                "http/timeline.py parser",
+                "dump/writer.py (downloads + dedup targets)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "Post.model_validate(<spike JSON item>) succeeds for all 30 items in the three spike files",
+              "Unknown key in the API response raises ValidationError",
+              "Category.ANNOUNCEMENTS.api_id == 2 and Category.GALLERIES.api_id == 3",
+              "Photo.ext returns .jpeg for 'IMG_2679.jpeg', .pdf for 'pozegnanie-z-dzieckiem.pdf', .bin for an empty name"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_models_timeline.py -q is green",
+              "uv run basedpyright src/inso_dumper/models/timeline.py is clean"
+            ]
+          }
+        },
+        {
+          "id": "T2",
+          "name": "Pure parser parse_timeline_page(body) -> CliResult[list[Post]]",
+          "depends_on": ["T1"],
+          "inputs": [
+            "approved design.md Findings",
+            "spike JSON files",
+            "Post model from T1"
+          ],
+          "description": "Create src/inso_dumper/http/timeline.py with one pure function and a small pydantic wrapper model TimelinePage ({items: list[Post], waitingToProcess: int}). The parser does json.loads(body) then TimelinePage.model_validate(data). An unknown top-level key or item key produces Err(CliError(PLATFORM_CHANGED, subject='timeline_page')) by catching ValidationError. An empty items array is Ok([]) — the iterator's stop signal. The parser does not add dumped_at; the dumper shell does that in P3 before serialising to post.json. Module docstring explicitly states 'functional core, no IO, no httpx'. The function lives in http/timeline.py because the module is small (parser plus the future shell), but the parser is imported only by the shell — no other consumer.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/http/timeline.py",
+              "tests/unit/test_http_timeline.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "parse_timeline_page",
+              "requirement": "convert API bytes to typed list[Post] at the IO boundary",
+              "consumers": [
+                "list_posts (P2)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "parses all three spike files and returns the documented item count",
+              "empty items list returns Ok([])",
+              "bogus extra key in items[0] returns Err(PLATFORM_CHANGED, 'timeline_page')",
+              "bogus extra top-level key returns Err(PLATFORM_CHANGED, 'timeline_page')",
+              "malformed JSON returns Err(PLATFORM_CHANGED, 'timeline_page')"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_http_timeline.py -q is green",
+              "parse_timeline_page is exported via __all__"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "HTTP shell: paginated iterator and signed-URL media download",
+      "tasks": [
+        {
+          "id": "T3",
+          "name": "list_posts(client, session, child_uuid, category) -> AsyncIterator[Post] shell",
+          "depends_on": ["T2"],
+          "inputs": [
+            "HttpClient Protocol (existing)",
+            "Category from T1",
+            "parse_timeline_page from T2",
+            "foundation spec's http/children_shell.py as a pattern"
+          ],
+          "description": "Add to src/inso_dumper/http/timeline.py an async def list_posts(client, session, child_uuid, category) -> AsyncIterator[Post] that yields Post and surfaces Err on transport / waitingToProcess failures. On each iteration, build the path f'/system-api/timeline/posts?page={page}&categoryId={category.api_id}&child={child_uuid}' and call client.request('GET', path, headers={'Cookie': f'PHPSESSID={session.phpsessid}'}). Parse via parse_timeline_page. Stop when the parsed items list is empty. On waitingToProcess > 0 retry the same page with exponential backoff (cap 30s, 3 attempts); on the 4th attempt give up with Err(CliError(HTTP, subject='waiting_to_process')). The shell does not use the Ok([]) stop signal if waitingToProcess > 0.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/client.py (HttpClient Protocol)",
+              "src/inso_dumper/models/session.py (Session)"
+            ],
+            "create": [
+              "tests/unit/test_http_timeline_shell.py"
+            ],
+            "modify": [
+              "src/inso_dumper/http/timeline.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "list_posts",
+              "requirement": "drive the API's page loop",
+              "consumers": [
+                "dump/sync.py orchestrator"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "one-page response (10 items) yields 10 Posts, stops",
+              "two-page response (10 + 10) yields 20, makes 2 GET calls",
+              "last page with <10 items yields them all, stops on the next empty page",
+              "waitingToProcess=1 then a settled page yields the settled page's items (no duplicate)",
+              "waitingToProcess=1 on all 3 retries surfaces Err(CliError(HTTP, 'waiting_to_process'))",
+              "client Err is propagated unchanged"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_http_timeline_shell.py -q is green",
+              "list_posts is exported in __all__"
+            ]
+          }
+        },
+        {
+          "id": "T4",
+          "name": "download_media(client, post) -> AsyncIterator[MediaItem] shell",
+          "depends_on": ["T3"],
+          "inputs": [
+            "HttpClient Protocol",
+            "Post model with its Media.photos and Media.attachments",
+            "design.md Findings (signed-URL semantics)"
+          ],
+          "description": "Add to src/inso_dumper/http/timeline.py an async def download_media(client, post) -> AsyncIterator[tuple[MediaItemKind, str, bytes]] where MediaItemKind is a small StrEnum (PHOTO / ATTACHMENT) and the str is the original name. The function iterates post.media.photos then post.media.attachments, GETting src.full / url for each. The signed URL is absolute (host file.inso.pl); the shell passes the full URL as the path argument so HttpxClient's base_url join yields the right request, and the shell sets the Host header. Bytes are streamed, never accumulated. Client errors propagate as Err(CliError(HTTP, 'media_download')). The function does not compute hashes — that is the writer's job (P3).",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/client.py (HttpClient Protocol)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/http/timeline.py",
+              "tests/unit/test_http_timeline_shell.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "download_media",
+              "requirement": "stream signed-URL media into the orchestrator",
+              "consumers": [
+                "dump/sync.py"
+              ]
+            },
+            {
+              "name": "MediaItemKind",
+              "requirement": "closed set distinguishing photos from attachments at the download boundary",
+              "consumers": [
+                "dump/sync.py",
+                "dump/writer.py"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "1 photo + 0 attachments yields one tuple with photo bytes",
+              "0 photos + 1 attachment yields one tuple with attachment bytes",
+              "3 photos yields 3 GET calls; correct request path for each (src.full)",
+              "client Err mid-stream propagates as Err(CliError(HTTP, 'media_download'))"
+            ],
+            "acceptance": [
+              "tests pass",
+              "no new public names beyond download_media and MediaItemKind"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "Storage layout, dedup, atomic writes, manifest",
+      "tasks": [
+        {
+          "id": "T5",
+          "name": "dump/layout.py — pure path derivation, content hash, dedup target",
+          "depends_on": ["T1"],
+          "inputs": [
+            "Child.slug rule (models/children.py)",
+            "Post.created_at and Post.title",
+            "design.md Storage layout"
+          ],
+          "description": "Create src/inso_dumper/dump/layout.py (a new package; add __init__.py) with pure functions: derive_post_slug(post: Post) -> str that formats f'{post.created_at.date().isoformat()}-{_slugify(post.title)}'. The _slugify helper imports the same _SLUG_RE and _ascii_fold from models/children.py so the slug rule is shared. post_target_dir(dump_root, child_slug, post) -> Path returns dump_root / child_slug / 'announcements' / derive_post_slug(post). Collision disambiguation (-1, -2, ...) is NOT the layout module's job; the writer handles that because it requires an existence check (IO). dedup_target(dump_root, sha256_hex, ext) -> Path returns dump_root / '_common' / 'photos' / sha256_hex[:2] / f'{sha256_hex}.{ext}'. A separate attachment_dedup_target(dump_root, sha256_hex, ext) is exported for the attachments tree. sha256_hex(data) -> str uses hashlib.sha256(data).hexdigest(); the layout module owns the hash function so the writer doesn't import hashlib directly, keeping the dedup rule in one place.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/models/children.py (_SLUG_RE, _ascii_fold)"
+            ],
+            "create": [
+              "src/inso_dumper/dump/__init__.py",
+              "src/inso_dumper/dump/layout.py",
+              "tests/unit/test_dump_layout.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "derive_post_slug",
+              "requirement": "pure post-slug derivation; no IO",
+              "consumers": [
+                "dump/sync.py"
+              ]
+            },
+            {
+              "name": "post_target_dir",
+              "requirement": "compute per-post target path; no IO",
+              "consumers": [
+                "dump/sync.py",
+                "dump/writer.py"
+              ]
+            },
+            {
+              "name": "dedup_target, attachment_dedup_target",
+              "requirement": "compute _common/ storage path by content hash",
+              "consumers": [
+                "dump/writer.py"
+              ]
+            },
+            {
+              "name": "sha256_hex",
+              "requirement": "single source of truth for the dedup hash function",
+              "consumers": [
+                "dump/writer.py"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "derive_post_slug(post_with_title='Wycieczka do Leniwej Zagrody', date=2026-08-27) == '2026-08-27-wycieczka-do-leniwej-zagrody'",
+              "same inputs yield the same output (idempotent)",
+              "dedup_target(d, 'ab' * 32, 'jpg') == d / '_common' / 'photos' / ('ab' * 2) / ('ab' * 32 + '.jpg')",
+              "sha256_hex(b'') returns the well-known empty-string SHA-256",
+              "no IO performed: a test that monkey-patches Path.exists and Path.mkdir asserts they are never called from layout.py"
+            ],
+            "acceptance": [
+              "tests pass",
+              "no IO performed in this module (asserted by the monkey-patch test)"
+            ]
+          }
+        },
+        {
+          "id": "T6",
+          "name": "dump/writer.py — atomic write, mode 0o600/0o700, symlink-or-copy",
+          "depends_on": ["T5"],
+          "inputs": [
+            "dump/layout.py paths",
+            "design.md Storage layout",
+            "foundation spec's session/store.py (atomic write pattern)"
+          ],
+          "description": "Create src/inso_dumper/dump/writer.py with: write_post(post: Post, target_dir: Path) -> CliResult[Path] which creates target_dir with 0o700, writes post.json (serialised via post.model_dump_json() with dumped_at set to datetime.now(UTC).isoformat()), post.html (the raw content), and post.md (best-effort HTML→Markdown; on failure logs INFO and skips post.md). All three files are 0o600. post.json is written first; if it fails, no post.html is written and target_dir is removed. write_deduped_media(dump_root, sha256_hex, ext, kind, data) -> CliResult[Path] writes to the _common/ path with 0o600, atomic (write to *.tmp then os.replace then fsync), idempotent (skip if file already exists with the same hash). link_media_to_post(post_dir, dedup_path, kind, n) -> CliResult[Path] creates post_dir / 'photos' / f'{n}{ext}' (or post_dir / 'files' / ...) as a relative symlink. On OSError (filesystem rejects symlinks), falls back to shutil.copy2(dedup_path, target) and logs at INFO. Returns the per-post path written. The module catches OSError at the boundary and converts to Err(CliError(INTERNAL, subject=<kind>_<op>)) so the core never sees an exception.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/session/store.py (atomic write pattern)"
+            ],
+            "create": [
+              "src/inso_dumper/dump/writer.py",
+              "tests/unit/test_dump_writer.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "write_post",
+              "requirement": "write the per-post directory atomically",
+              "consumers": [
+                "dump/sync.py"
+              ]
+            },
+            {
+              "name": "write_deduped_media",
+              "requirement": "store bytes in _common/ exactly once",
+              "consumers": [
+                "dump/sync.py"
+              ]
+            },
+            {
+              "name": "link_media_to_post",
+              "requirement": "connect a per-post directory to the shared store, with copy fallback",
+              "consumers": [
+                "dump/sync.py"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "write_post creates target_dir with 0o700, three files with 0o600, JSON round-trips",
+              "On simulated OSError mid-write, target_dir is removed and Err(INTERNAL) returned",
+              "write_deduped_media on an existing path with the same hash is a no-op, Ok(path)",
+              "write_deduped_media on an existing path with a different hash returns Err(INTERNAL, 'dedup_collision')",
+              "link_media_to_post creates a symlink that points to the dedup target; on a monkey-patched OSError from Path.symlink_to, falls back to a copy and the bytes are identical"
+            ],
+            "acceptance": [
+              "tests pass",
+              "chmod bits verified with Path.stat().st_mode & 0o777"
+            ]
+          }
+        },
+        {
+          "id": "T7",
+          "name": "dump/manifest.py — per-child SQLite read/write",
+          "depends_on": ["T5"],
+          "inputs": [
+            "dump/layout.py",
+            "design.md Data Model",
+            "stdlib sqlite3"
+          ],
+          "description": "Create src/inso_dumper/dump/manifest.py with a Manifest class wrapping a sqlite3.Connection (context-manager style; module owns lifecycle). __init__(self, path: Path) creates path.parent with parents=True, opens the DB, sets PRAGMA user_version = 1 on first open and applies the schema. already_dumped(post_id: str) -> bool is the read side: SELECT 1 FROM posts WHERE post_id = ?. upsert(post: Post, child_slug: str, post_slug: str, category_id: int, media_count: int) -> CliResult[None] is the write side: INSERT INTO posts (...) ON CONFLICT(post_slug) DO UPDATE SET last_seen_at=..., media_count=.... force_clear(post_slug: str) -> CliResult[None] is used by --force. close() is idempotent. All sqlite3.Error are caught at the boundary and converted to Err(CliError(INTERNAL, subject='manifest_<op>')).",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/dump/manifest.py",
+              "tests/unit/test_dump_manifest.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Manifest",
+              "requirement": "idempotent per-child sync state",
+              "consumers": [
+                "dump/sync.py",
+                "CLI --force flag (P4)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "empty DB: already_dumped('nonexistent') is False",
+              "upsert then already_dumped is True",
+              "upsert with same post_id but new post_slug raises the unique constraint (covered as Err)",
+              "force_clear removes the row; already_dumped is False again",
+              "simulated sqlite3.OperationalError returns Err(INTERNAL, 'manifest_<op>')"
+            ],
+            "acceptance": [
+              "tests pass",
+              "the DB file's user_version is 1 after first open"
+            ]
+          }
+        },
+        {
+          "id": "T8",
+          "name": "dump/sync.py orchestrator",
+          "depends_on": ["T3", "T4", "T5", "T6", "T7"],
+          "inputs": [
+            "dump/layout.py",
+            "dump/writer.py",
+            "dump/manifest.py",
+            "http/timeline.py shell",
+            "HttpClient",
+            "Session",
+            "Child (resolved from slug)",
+            "Config",
+            "Category enum"
+          ],
+          "description": "Create src/inso_dumper/dump/sync.py with one public coroutine: async def run(*, client, session, child, category, dump_root, force=None, log) -> CliResult[SyncSummary] where SyncSummary is @dataclass(frozen=True, slots=True) with posts_new: int, posts_skipped: int, photos: int, attachments: int, seconds: float. The function: (1) opens a Manifest at dump_root / child.slug / 'announcements' / '.manifest.sqlite'; (2) iterates list_posts(client, session.user_uuid, category); for each Post: if manifest.already_dumped(post.id) and slug is not in force, increment posts_skipped and continue; compute post_slug = derive_post_slug(post), target_dir = post_target_dir(dump_root, child.slug, post); if target_dir exists, pick the next -N suffix to disambiguate; call write_post(post, target_dir); on Err propagate; iterate download_media(client, post); for each tuple compute h = sha256_hex(bytes), dedup_path = dedup_target(dump_root, h, ext), call write_deduped_media(...), then link_media_to_post(target_dir, dedup_path, kind, n); update counts; call manifest.upsert(post, ...). (3) Closes the manifest. Returns Ok(SyncSummary(...)). All Err from inner calls short-circuit the run (no partial dumps). The function never raises; the inner modules own the boundary conversions.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/timeline.py (list_posts, download_media, MediaItemKind)",
+              "src/inso_dumper/dump/layout.py (derive_post_slug, post_target_dir, dedup_target, sha256_hex)",
+              "src/inso_dumper/dump/writer.py (write_post, write_deduped_media, link_media_to_post)",
+              "src/inso_dumper/dump/manifest.py (Manifest)",
+              "src/inso_dumper/http/client.py (HttpClient)",
+              "src/inso_dumper/models/session.py (Session)",
+              "src/inso_dumper/models/children.py (Child)",
+              "src/inso_dumper/config.py (Config)",
+              "src/inso_dumper/models/timeline.py (Category)"
+            ],
+            "create": [
+              "src/inso_dumper/dump/sync.py",
+              "tests/unit/test_dump_sync.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "SyncSummary",
+              "requirement": "a typed result the CLI can format",
+              "consumers": [
+                "cli.py (P4)"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "one child, one category, 1 post with 0 media: posts_new=1, photos=0, attachments=0; post.json / post.html exist",
+              "one post with 2 photos: photos=2; _common/photos/<sha>.<ext> exists; symlinks under target_dir/photos/ resolve to it",
+              "second run with the same fixture: posts_skipped=1, no new files",
+              "--force {slug} on a skipped post re-downloads media, updates last_seen_at",
+              "manifest.already_dumped returns False for the first run, True after",
+              "Err from write_post short-circuits the rest of the run"
+            ],
+            "acceptance": [
+              "tests pass against the spike's recorded JSON",
+              "tests skip with a clear reason if docs/api-notes-data/*.json is absent"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "name": "CLI: sync subcommand",
+      "tasks": [
+        {
+          "id": "T9",
+          "name": "inso-dumper sync <child-slug> [--category] [--dump-root] [--force]",
+          "depends_on": ["T8"],
+          "inputs": [
+            "cli.py pattern from login and children",
+            "dump/sync.py orchestrator",
+            "Session loader (ensure_session_loaded)",
+            "Config loader (load_config)",
+            "Child.slug rule"
+          ],
+          "description": "Add a new typer subcommand sync to src/inso_dumper/cli.py. The command: (1) loads Session via ensure_session_loaded(session_file()); on Err propagate. (2) loads Config via load_config(config_path); on Err propagate. (3) resolves child_slug -> Child by running list_children_shell(client, cfg, session) and matching c.slug == child_slug; unknown slug returns Err(CliError(PLATFORM_CHANGED, subject='unknown_child_slug')) with a stderr message listing available slugs. (4) parses --category (typer Enum-backed option) into a set[Category]; default is {ANNOUNCEMENTS, GALLERIES}. (5) parses --dump-root (default Path('dump')); converts to absolute and creates it with 0o700 (reusing the writer's atomic pattern). (6) parses --force as a repeatable option into set[str]. (7) builds the coroutine _do_sync() that opens HttpxClient(cfg) and calls dump.sync.run(...) for each category, summing the SyncSummary results. (8) prints 'Synced N posts (M photos, K attachments) for <child-slug> in Ts.' to stdout on success; exits 0. The single _dispatch wrapper preserves the foundation's last-resort INTERNAL safety net.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/session_expiry.py (ensure_session_loaded)",
+              "src/inso_dumper/config.py (load_config)",
+              "src/inso_dumper/http/children_shell.py (list_children)",
+              "src/inso_dumper/http/client.py (HttpxClient)",
+              "src/inso_dumper/dump/sync.py (run, SyncSummary)",
+              "src/inso_dumper/models/timeline.py (Category)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/cli.py",
+              "tests/integration/test_cli.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "missing session -> exit 4",
+              "unknown --category value -> typer UsageError (exit 2)",
+              "unknown child-slug -> exit 6 with stderr listing known slugs",
+              "happy path with a fake client that returns one page of 1 post with 1 photo -> exit 0, stdout contains 'Synced 1 posts', dump/<slug>/announcements/<date>-<slug>/post.json exists, _common/photos/... exists, the symlink resolves",
+              "second run with the same fake client (same post_id) -> exit 0, stdout contains '1 skipped'"
+            ],
+            "acceptance": [
+              "uv run pytest tests/integration/test_cli.py -q is green",
+              "uv run inso-dumper --help shows the sync subcommand",
+              "uv run inso-dumper sync --help shows sync-specific options"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

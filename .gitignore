@@ -2,6 +2,10 @@
 # and auth headers. Never commit.
 docs/api-notes/har/
 
+# Captured JSON/HTML samples from announcement-and-dedup spike. Contains
+# session-bound signed URLs (S3-style) and child data. Never commit.
+docs/api-notes-data/
+
 # Python
 __pycache__/
 *.py[cod]
