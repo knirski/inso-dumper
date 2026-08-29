@@ -220,9 +220,11 @@ def resolve_post_dir(
 
 
 def write_post(post: Post, target_dir: Path, *, log: logging.Logger) -> CliResult[Path]:
-    """Write the per-post directory atomically: ``post.json`` first, then
-    ``post.html``, then best-effort ``post.md``. Any ``OSError`` removes
-    the directory and returns ``Err(INTERNAL)`` — no partial dumps.
+    """Write the per-post directory atomically: ``post.json``, then
+    ``post.html``, then ``post.md`` (a best-effort HTML→Markdown
+    conversion — the converter itself never fails, so all three files
+    are written or none are). Any ``OSError`` removes the directory and
+    returns ``Err(INTERNAL)`` — no partial dumps.
     """
     stamped = post.model_copy(update={"dumped_at": datetime.now(UTC)})
     files: list[_PostFile] = [

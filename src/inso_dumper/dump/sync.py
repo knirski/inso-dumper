@@ -123,10 +123,12 @@ async def run(
                 match media_item:
                     case Err(error):
                         return Err(error)
-                    case Ok((kind, name, data)):
+                    case Ok((kind, name, url, data)):
                         pass
                 digest = sha256_hex(data)
-                stored = write_deduped_media(dump_root, digest, ext_from(name), kind, data, log=log)
+                stored = write_deduped_media(
+                    dump_root, digest, ext_from(name, url), kind, data, log=log
+                )
                 match stored:
                     case Err(error):
                         return Err(error)

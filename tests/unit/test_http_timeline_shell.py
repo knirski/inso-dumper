@@ -239,9 +239,10 @@ def test_download_media_photo_yields_bytes_with_kind_and_name() -> None:
 
     assert len(results) == 1
     assert isinstance(results[0], Ok)
-    kind, name, data = results[0].value
+    kind, name, url, data = results[0].value
     assert kind is timeline_module.MediaItemKind.PHOTO
     assert name == "IMG_1.jpeg"
+    assert url == _photo()["src"]["full"]
     assert data == b"jpeg-bytes"
     assert client.calls[0]["path"].startswith("https://file.inso.pl/")
     headers = client.calls[0].get("headers") or {}
@@ -255,9 +256,10 @@ def test_download_media_attachment_uses_url() -> None:
     results = asyncio.run(_collect(download_media(client, post)))
 
     assert isinstance(results[0], Ok)
-    kind, name, data = results[0].value
+    kind, name, url, data = results[0].value
     assert kind is timeline_module.MediaItemKind.ATTACHMENT
     assert name == "dokument.pdf"
+    assert url == _attachment()["url"]
     assert data == b"pdf-bytes"
     assert client.calls[0]["path"] == _attachment()["url"]
 
@@ -269,9 +271,10 @@ def test_download_media_video_yields_video_kind() -> None:
     results = asyncio.run(_collect(download_media(client, post)))
 
     assert isinstance(results[0], Ok)
-    kind, name, data = results[0].value
+    kind, name, url, data = results[0].value
     assert kind is timeline_module.MediaItemKind.VIDEO
     assert name == "klip.mp4"
+    assert url == _video()["src"]["mp4"]
     assert data == b"mp4-bytes"
 
 
@@ -281,7 +284,7 @@ def test_download_media_three_photos_three_calls_in_order() -> None:
 
     results = asyncio.run(_collect(download_media(client, post)))
 
-    assert [r.value[2] for r in results if isinstance(r, Ok)] == [b"x", b"y", b"z"]
+    assert [r.value[3] for r in results if isinstance(r, Ok)] == [b"x", b"y", b"z"]
     assert len(client.calls) == 3
 
 
@@ -298,7 +301,7 @@ def test_download_media_error_mid_stream_propagates() -> None:
     assert results[1].error is err
 
 
-def test_download_media_error_status_surfaces_http_media_download() -> None:
+def test_download_media_error_status_surfaces_http_with_status() -> None:
     post = _make_post(photos=[_photo()])
     client = FakeHttpClient([(403, b"expired", [])])
 
@@ -307,7 +310,7 @@ def test_download_media_error_status_surfaces_http_media_download() -> None:
     assert len(results) == 1
     assert isinstance(results[0], Err)
     assert results[0].error.kind is CliErrorKind.HTTP
-    assert results[0].error.subject == "media_download"
+    assert results[0].error.subject == "media_status_403"
 
 
 def test_download_media_no_media_makes_no_calls() -> None:
