@@ -1,0 +1,216 @@
+"""CLI entry point: typer app, command wiring, exit-code dispatch.
+
+The CLI is the only place that:
+  - reads env and config,
+  - builds an ``HttpClient``,
+  - maps a closed ``CliError`` family to documented exit codes,
+  - renders output.
+
+The single outer ``try/except Exception`` in each command is the
+last-resort safety net per AGENTS.md. Every other function returns
+``CliResult[T]``.
+
+Note: we do NOT use ``from __future__ import annotations`` here so
+that typer's runtime annotation introspection sees real types.
+"""
+
+# ruff: noqa: B008  # typer.Option as default is the documented typer idiom.
+
+import asyncio
+import dataclasses
+import json
+import os
+import sys
+from collections.abc import Awaitable, Callable
+from logging import Logger
+from pathlib import Path
+from typing import Any, NoReturn, assert_never
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from inso_dumper._result import Err
+from inso_dumper.config import load_config
+from inso_dumper.errors import CliError, CliErrorKind, CliResult
+from inso_dumper.http.children_shell import list_children as list_children_shell
+from inso_dumper.http.client import HttpxClient
+from inso_dumper.http.login import login as login_shell
+from inso_dumper.http.session_expiry import ensure_session_loaded
+from inso_dumper.logging_setup import (
+    get_logger,
+    is_verbose,
+    setup_logging,
+)
+from inso_dumper.paths import session_file
+from inso_dumper.session.store import save_session
+
+app = typer.Typer(
+    name="inso-dumper",
+    help="Local backup tool for the Inso platform (app.inso.pl).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+_console_err = Console(file=sys.stderr)
+_console_out = Console()
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from importlib.metadata import version
+
+        _console_out.print(version("inso-dumper"))
+        raise typer.Exit(0)
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True),
+) -> None:
+    """Global options: --version."""
+
+
+def exit_code_for(err: CliError) -> int:
+    """Map a CliError to its documented exit code."""
+    match err.kind:
+        case CliErrorKind.CONFIG:
+            return 2
+        case CliErrorKind.AUTH:
+            return 3
+        case CliErrorKind.SESSION_EXPIRED:
+            return 4
+        case CliErrorKind.HTTP:
+            return 5
+        case CliErrorKind.PLATFORM_CHANGED:
+            return 6
+        case CliErrorKind.INTERNAL:
+            return 99
+        case _ as unreachable:  # type: ignore[unreachable]
+            return assert_never(unreachable)
+
+
+def _format_error(err: CliError) -> str:
+    return f"error[{err.kind.value}]: {err.subject}" if err.subject else f"error[{err.kind.value}]"
+
+
+def _die(err: CliError, log: Logger) -> NoReturn:
+    log.error("%s", _format_error(err))
+    _console_err.print(_format_error(err), style="red")
+    raise typer.Exit(exit_code_for(err))
+
+
+def _dispatch(
+    coro_factory: Callable[[], Awaitable[CliResult[Any]]],
+    log: Logger,
+) -> CliResult[Any]:
+    """Run a coroutine in a single asyncio.run with the last-resort catch.
+
+    ``coro_factory`` builds the coroutine so the HttpxClient is constructed
+    inside the event loop (where its async __aenter__ runs).
+    """
+    try:
+        return asyncio.run(coro_factory())
+    except Exception as exc:  # last-resort safety net per AGENTS.md
+        log.exception("command: unexpected exception")
+        return Err(CliError(kind=CliErrorKind.INTERNAL, subject=type(exc).__name__))
+
+
+@app.command()
+def login(
+    config_path: Path | None = typer.Option(
+        None, "--config", help="Alternate TOML config file path."
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """Authenticate against the Inso platform and persist the session."""
+    setup_logging(verbose=verbose or is_verbose())
+    log = get_logger("cli")
+
+    email = os.environ.get("INSO_EMAIL", "")
+    password = os.environ.get("INSO_PASSWORD", "")
+    if not email or not password:
+        _die(
+            CliError(kind=CliErrorKind.CONFIG, subject="missing_credentials"),
+            log,
+        )
+
+    async def _do_login() -> CliResult[Any]:
+        cfg_result = load_config(config_path)
+        if isinstance(cfg_result, Err):
+            return cfg_result
+        cfg = cfg_result.value
+        async with HttpxClient(cfg) as client:
+            return await login_shell(client, cfg, email, password)
+
+    result = _dispatch(_do_login, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    session = result.value
+
+    save = save_session(session_file(), session)
+    if isinstance(save, Err):
+        _die(save.error, log)
+
+    log.info("login ok user_uuid=%s", session.user_uuid)
+    _console_out.print("OK")
+    raise typer.Exit(0)
+
+
+@app.command()
+def children(
+    config_path: Path | None = typer.Option(
+        None, "--config", help="Alternate TOML config file path."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a rich table."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """List children on the authenticated account."""
+    setup_logging(verbose=verbose or is_verbose())
+    log = get_logger("cli")
+
+    session_result = ensure_session_loaded(session_file())
+    if isinstance(session_result, Err):
+        if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
+            _console_err.print(
+                "No usable saved session. Run `inso-dumper login` first.",
+                style="yellow",
+            )
+        _die(session_result.error, log)
+    session = session_result.value
+
+    async def _do_list() -> CliResult[Any]:
+        cfg_result = load_config(config_path)
+        if isinstance(cfg_result, Err):
+            return cfg_result
+        cfg = cfg_result.value
+        async with HttpxClient(cfg) as client:
+            return await list_children_shell(client, cfg, session)
+
+    result = _dispatch(_do_list, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    kids = result.value
+
+    if as_json:
+        _console_out.print(json.dumps([_child_to_dict(c) for c in kids], indent=2))
+    else:
+        if not kids:
+            _console_out.print("No children on this account.")
+        else:
+            table = Table(title="Children")
+            table.add_column("Slug", style="cyan")
+            table.add_column("Name", style="white")
+            table.add_column("Group", style="dim")
+            for c in kids:
+                table.add_row(c.slug, c.display_name, c.group or "-")
+            _console_out.print(table)
+    raise typer.Exit(0)
+
+
+def _child_to_dict(c: Any) -> dict[str, Any]:
+    """Serialize a Child for --json. Use asdict for the fields, then add
+    the computed properties so the JSON output stays in sync with the
+    dataclass automatically.
+    """
+    return {**dataclasses.asdict(c), "slug": c.slug, "display_name": c.display_name}
