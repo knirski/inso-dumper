@@ -14,12 +14,12 @@ from tests.conftest import FakeHttpClient, make_session
 DASHBOARD_HTML = """
 <el-menu id="menu-0" role="menu">
   <a href="https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782" id="i1">
-    <div style="background-color: #FCCC34;"><span>IG</span></div>
-    <span>Ignacy</span>
+    <div style="background-color: #FCCC34;"><span>FK</span></div>
+    <span>Franek</span>
   </a>
   <a href="https://app.inso.pl/panel/home/a703dc5a-042d-4122-96e8-4c5111e5f7cf" id="i2">
-    <div style="background-color: #A9CC63;"><span>LI</span></div>
-    <span>Liliana</span>
+    <div style="background-color: #A9CC63;"><span>Z</span></div>
+    <span>Zofia</span>
   </a>
 </el-menu>
 """
@@ -33,8 +33,8 @@ def test_list_children_returns_two_children_from_dashboard() -> None:
     result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
     assert isinstance(result, Ok)
     assert len(result.value) == 2
-    assert result.value[0].first_name == "Ignacy"
-    assert result.value[1].first_name == "Liliana"
+    assert result.value[0].first_name == "Franek"
+    assert result.value[1].first_name == "Zofia"
     assert client.calls[0]["path"] == "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/"
 
 

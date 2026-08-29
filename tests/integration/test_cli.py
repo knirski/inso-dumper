@@ -157,3 +157,161 @@ def test_internal_exit_code_on_unexpected_exception(
     monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
     result = cli_runner.invoke(app, ["children"])
     assert result.exit_code == 99
+
+
+# --- sync command ------------------------------------------------------------
+
+DASHBOARD_HTML = """
+<el-menu id="menu-0" role="menu">
+  <a href="https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782" id="i1">
+    <div style="background-color: #FCCC34;"><span>FK</span></div>
+    <span>Franek</span>
+  </a>
+</el-menu>
+"""
+
+SYNC_POST = {
+    "id": "3d5b38b4-6c0b-4e79-8e55-375272c76779",
+    "title": "Wycieczka",
+    "content": "<p>hello</p>",
+    "media": {
+        "photos": [
+            {
+                "type": "photo",
+                "name": "IMG_1.jpeg",
+                "src": {
+                    "thumb": "https://file.inso.pl/t/1/thumb.jpg",
+                    "full": "https://file.inso.pl/t/1/full.jpeg",
+                },
+            }
+        ],
+        "videos": [],
+        "attachments": [],
+    },
+    "createdAt": 1787811431,
+    "createdAtText": "czwartek,  8:17",
+    "visibleFor": ["Żółta"],
+    "visibleForChildren": [],
+    "actions": {"vote": "/v", "unvote": "/u"},
+    "sticky": False,
+    "archived": False,
+    "userVoted": False,
+    "author": "Lipińska Agnieszka",
+    "likes": 0,
+    "likesText": "0 polubień",
+    "commentsAvailable": False,
+    "comments": 0,
+    "commentsText": "0 komentarzy",
+    "isWorker": False,
+    "isWorkerOnly": False,
+    "displayed": True,
+    "poll": None,
+    "translations": [],
+}
+
+
+def _sync_script(second_run: bool) -> list[Any]:
+    def page(items: list[Any]) -> tuple[int, bytes, list]:
+        body = json.dumps({"items": items, "waitingToProcess": 0}).encode("utf-8")
+        return (200, body, [])
+
+    empty = page([])
+    one_post = page([SYNC_POST])
+    script: list[Any] = [(200, DASHBOARD_HTML.encode("utf-8"), []), one_post]
+    if not second_run:
+        script.append((200, b"jpeg-bytes", []))
+    script.append(empty)
+    return script
+
+
+def _prepare_sync_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: list[Any]) -> Path:
+    from inso_dumper.models.session import Session
+    from tests.conftest import FakeHttpClient
+
+    session_dir = tmp_path / "inso-dumper"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_store.save_session(
+        session_dir / "session.json",
+        Session(phpsessid="x", user_uuid=SPIKE_USER_UUID),
+    )
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("INSO_DUMPER_CONFIG", raising=False)
+
+    client = FakeHttpClient(script)
+    monkeypatch.setattr(cli_mod, "HttpxClient", lambda _cfg: client)
+    return tmp_path / "dump"
+
+
+def test_sync_missing_session_exits_4(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    result = cli_runner.invoke(app, ["sync", "franek"])
+    assert result.exit_code == 4
+
+
+def test_sync_unknown_category_exits_2(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    result = cli_runner.invoke(app, ["sync", "franek", "--category", "bogus"])
+    assert result.exit_code == 2
+
+
+def test_sync_unknown_slug_exits_6_and_lists_slugs(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    import rich.console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_mod, "_console_err", rich.console.Console(file=buf))
+    dump = _prepare_sync_env(tmp_path, monkeypatch, _sync_script(second_run=True))
+    result = cli_runner.invoke(app, ["sync", "nope", "--dump-root", str(dump)])
+    combined = (result.stdout or "") + (result.stderr or "") + buf.getvalue()
+    assert result.exit_code == 6
+    assert "franek" in combined
+
+
+def test_sync_happy_path_dumps_post_and_dedupes_media(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dump = _prepare_sync_env(tmp_path, monkeypatch, _sync_script(second_run=False))
+    result = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "announcements", "--dump-root", str(dump)]
+    )
+
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    assert "Synced 1 posts" in result.stdout
+    assert "0 skipped" in result.stdout
+    post_dir = dump / "franek" / "announcements" / "2026-08-27-wycieczka"
+    assert (post_dir / "post.json").is_file()
+    link = post_dir / "photos" / "1.jpeg"
+    assert link.is_symlink()
+    common = dump / "_common" / "photos"
+    assert len(list(common.rglob("*.jpeg"))) == 1
+    assert link.resolve().is_relative_to(common.resolve())
+
+
+def test_sync_second_run_reports_skipped(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dump = _prepare_sync_env(tmp_path, monkeypatch, _sync_script(second_run=False))
+    first = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "announcements", "--dump-root", str(dump)]
+    )
+    assert first.exit_code == 0, (first.stdout or "") + (first.stderr or "")
+
+    # Rebuild the fake for the second run: children scrape + pages, no media.
+    _prepare_sync_env(tmp_path, monkeypatch, _sync_script(second_run=True))
+    second = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "announcements", "--dump-root", str(dump)]
+    )
+
+    assert second.exit_code == 0, (second.stdout or "") + (second.stderr or "")
+    assert "1 skipped" in second.stdout
+    assert "Synced 0 posts" in second.stdout

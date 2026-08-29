@@ -27,6 +27,63 @@ def make_session(
     return Session(phpsessid=phpsessid, user_uuid=user_uuid)
 
 
+def make_post_dict(**overrides: Any) -> dict[str, Any]:
+    """A minimal but complete API-shaped timeline post payload (camelCase)."""
+    base: dict[str, Any] = {
+        "id": "3d5b38b4-6c0b-4e79-8e55-375272c76779",
+        "title": "Wycieczka",
+        "content": "<p>hello</p>",
+        "media": {"photos": [], "videos": [], "attachments": []},
+        "createdAt": 1787811431,
+        "createdAtText": "czwartek,  8:17",
+        "visibleFor": ["Zółta"],
+        "visibleForChildren": [],
+        "actions": {"vote": "/v", "unvote": "/u"},
+        "sticky": False,
+        "archived": False,
+        "userVoted": False,
+        "author": "Lipińska Agnieszka",
+        "likes": 0,
+        "likesText": "0 polubień",
+        "commentsAvailable": False,
+        "comments": 0,
+        "commentsText": "0 komentarzy",
+        "isWorker": False,
+        "isWorkerOnly": False,
+        "displayed": True,
+        "poll": None,
+        "translations": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def make_photo_dict(name: str = "IMG_1.jpeg") -> dict[str, Any]:
+    return {
+        "type": "photo",
+        "name": name,
+        "src": {
+            "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
+            "full": f"https://file.inso.pl/t/1/{name}/full.jpg?Expires=1",
+        },
+    }
+
+
+def make_video_dict(name: str = "klip.mp4") -> dict[str, Any]:
+    return {
+        "type": "video",
+        "name": name,
+        "src": {
+            "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
+            "full": f"https://file.inso.pl/t/1/{name}/full.mp4?Expires=1",
+        },
+    }
+
+
+def make_attachment_dict(name: str = "dokument.pdf") -> dict[str, Any]:
+    return {"name": name, "url": f"https://file.inso.pl/t/1/{name}?Expires=1"}
+
+
 class FakeHttpClient:
     """A minimal in-memory HttpClient for shell tests.
 

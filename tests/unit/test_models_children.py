@@ -9,7 +9,7 @@ from inso_dumper.models.children import Child
 
 def _child(
     *,
-    first: str = "Ignacy",
+    first: str = "Franek",
     last: str = "",
     color: str = "#FCCC34",
     initials: str = "IG",
@@ -27,13 +27,13 @@ def _child(
 
 
 def test_slug_is_firstname_when_no_last_name() -> None:
-    c = _child(first="Ignacy", last="")
-    assert c.slug == "ignacy"
+    c = _child(first="Franek", last="")
+    assert c.slug == "franek"
 
 
 def test_slug_includes_last_initial_when_known() -> None:
-    c = _child(first="Ignacy", last="Nirski")
-    assert c.slug == "ignacy-n"
+    c = _child(first="Franek", last="Kowalski")
+    assert c.slug == "franek-k"
 
 
 def test_slug_falls_back_to_child_when_empty() -> None:
@@ -57,13 +57,13 @@ def test_slug_collapses_hyphens() -> None:
 
 
 def test_display_name_with_full_name() -> None:
-    c = _child(first="Ignacy", last="Nirski")
-    assert c.display_name == "Ignacy Nirski"
+    c = _child(first="Franek", last="Kowalski")
+    assert c.display_name == "Franek Kowalski"
 
 
 def test_display_name_first_only_when_no_last() -> None:
-    c = _child(first="Ignacy", last="")
-    assert c.display_name == "Ignacy"
+    c = _child(first="Franek", last="")
+    assert c.display_name == "Franek"
 
 
 def test_child_is_frozen() -> None:
@@ -80,8 +80,8 @@ def test_child_is_frozen() -> None:
 @pytest.mark.parametrize(
     ("first", "last", "expected"),
     [
-        ("Ignacy", "", "ignacy"),
-        ("Liliana", "", "liliana"),
+        ("Franek", "", "franek"),
+        ("Zofia", "", "zofia"),
         ("Anna", "Kowalska", "anna-k"),
         ("Łucja", "Nowak", "lucja-n"),
         ("", "", "child"),

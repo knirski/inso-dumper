@@ -38,7 +38,7 @@ class Category(IntEnum):
         return int(self)
 
 
-def _ext_from(name: str, url: str) -> str:
+def ext_from(name: str, url: str = "") -> str:
     """Derive a file extension (leading dot included).
 
     Preference order: the original filename's suffix, then the URL
@@ -69,7 +69,7 @@ class Photo(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.src.full))
+        return ext_from(self.name, str(self.src.full))
 
 
 class Video(BaseModel):
@@ -87,7 +87,7 @@ class Video(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.src.full))
+        return ext_from(self.name, str(self.src.full))
 
 
 class Attachment(BaseModel):
@@ -98,7 +98,7 @@ class Attachment(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.url))
+        return ext_from(self.name, str(self.url))
 
 
 class Media(BaseModel):
@@ -146,4 +146,4 @@ class Post(BaseModel):
     dumped_at: datetime | None = None
 
 
-__all__ = ["Attachment", "Category", "Media", "Photo", "PhotoSource", "Post", "Video"]
+__all__ = ["Attachment", "Category", "Media", "Photo", "PhotoSource", "Post", "Video", "ext_from"]
