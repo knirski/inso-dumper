@@ -27,6 +27,7 @@ from inso_dumper.models.session import Session
 # 5 is a 2.5x safety margin that bounds a redirect-storm DoS in
 # seconds, not unbounded.
 _MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 def _is_same_origin(url: str, base: str) -> bool:
@@ -101,7 +102,7 @@ async def login(
         for name, value in current.headers:
             if name.lower() == "set-cookie":
                 accumulated_cookies.append((name, value))
-        if current.status not in (301, 302, 303, 307, 308):
+        if current.status not in _REDIRECT_STATUSES:
             break
         location = _header_value(current.headers, "location")
         if not location:
@@ -111,7 +112,9 @@ async def login(
         # Off-domain redirect is a server anomaly: return HTTP so the
         # user is told the platform sent us somewhere unexpected.
         if not _is_same_origin(last_url, base):
-            return Err(CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect"))
+            return Err(
+                CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect")
+            )
         # Strip the base prefix; handle the empty case explicitly.
         path = last_url[len(base) :]
         if not path:
@@ -123,10 +126,18 @@ async def login(
             case Ok(response):
                 current = response
     else:
-        # Loop exhausted without a 200 final response. The server is
-        # misbehaving (a redirect storm is closer to a transport /
-        # protocol anomaly than to bad credentials), so this is HTTP.
-        return Err(CliError(kind=CliErrorKind.HTTP, subject="redirect_loop"))
+        # The for-else fires only when the loop completed without
+        # breaking — i.e. all _MAX_REDIRECTS iterations ran end to end.
+        # At that point `current` is the response fetched on the last
+        # allowed redirect. If it is itself a followable redirect, the
+        # server is in a loop and we surface HTTP. If it is the final
+        # response (e.g. HTTP 200), fall through to the parser.
+        if current.status in _REDIRECT_STATUSES and _header_value(
+            current.headers, "location"
+        ):
+            return Err(
+                CliError(kind=CliErrorKind.HTTP, subject="redirect_loop")
+            )
 
     # 4. Build a synthetic final response that includes the accumulated
     # Set-Cookie headers, then decode.

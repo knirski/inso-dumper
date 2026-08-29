@@ -118,6 +118,35 @@ def test_login_stops_after_max_redirects() -> None:
     assert result.error.subject == "redirect_loop"
 
 
+def test_login_accepts_final_response_at_max_redirects() -> None:
+    """A chain with exactly 5 redirects followed by HTTP 200 must succeed.
+
+    The for-else fires after the 5th allowed redirect; the previous
+    code returned redirect_loop unconditionally even when the 5th
+    response was the final HTTP 200. The fix checks whether the last
+    response is itself a followable redirect before declaring a loop.
+    """
+    cookie = "PHPSESSID=d9f828d2629433b8d1b9690a17d477e3; path=/; HttpOnly"
+    client = FakeHttpClient(
+        [
+            _ok(200, b"<html>login form</html>"),
+            # 5 redirect hops (the limit).
+            _ok(302, b"", [("Location", "/r1")]),
+            _ok(302, b"", [("Location", "/r2")]),
+            _ok(302, b"", [("Location", "/r3")]),
+            _ok(302, b"", [("Location", "/r4")]),
+            _ok(302, b"", [("Set-Cookie", cookie), ("Location", "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/")]),
+            # The 6th request (after the 5th redirect) is the final response.
+            _ok(200, b"<html>dashboard</html>"),
+        ]
+    )
+    cfg = Config()
+    result = asyncio.run(login(client, cfg, "u@x", "p"))  # type: ignore[arg-type]
+    assert isinstance(result, Ok)
+    assert result.value.phpsessid == "d9f828d2629433b8d1b9690a17d477e3"
+    assert result.value.user_uuid == "eea48660-3740-11ed-a611-06dd2728d782"
+
+
 def test_login_off_domain_redirect_returns_http() -> None:
     """A server-side redirect to a different origin is a transport anomaly."""
     client = FakeHttpClient(
