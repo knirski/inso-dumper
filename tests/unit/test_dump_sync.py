@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,7 @@ def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(timeline_module, "_sleep", _instant)
 
 
-def _run(client: FakeHttpClient, tmp_path: Path, **kwargs: Any):
+def _run(client: FakeHttpClient, tmp_path: Path, **kwargs: Any) -> Ok[Any] | Err[CliError]:
     return asyncio.run(
         run(
             client=client,  # type: ignore[arg-type]
@@ -212,6 +213,61 @@ def test_slug_collision_gets_suffix(tmp_path: Path) -> None:
     assert names == [derive_post_slug(first), derive_post_slug(first) + "-1"]
 
 
+def test_collision_suffixed_post_is_skipped_on_rerun(tmp_path: Path) -> None:
+    """The manifest records the actual (suffixed) directory; a post dumped
+    at <slug>-1 must skip on re-runs, not re-download."""
+    first = _make_post(post_id="11111111-1111-1111-1111-111111111111")
+    second = _make_post(post_id="22222222-2222-2222-2222-222222222222")
+    client = FakeHttpClient([_page(_post_dicts([first, second])), _page([])])
+    _run(client, tmp_path)
+
+    rerun = FakeHttpClient([_page(_post_dicts([first, second])), _page([])])
+    result = _run(rerun, tmp_path)
+
+    assert isinstance(result, Ok)
+    assert (result.value.posts_new, result.value.posts_skipped) == (0, 2)
+
+
+def test_interrupted_force_rerun_recovers(tmp_path: Path) -> None:
+    """An interrupted --force re-dump must not be mistaken for a complete
+    dump later: force_clear drops the row up front, so the next normal
+    run re-dumps via the partial-recovery path."""
+    posts = [_make_post(photos=[make_photo_dict()])]
+    setup = FakeHttpClient([_page(_post_dicts(posts)), (200, b"jpeg", []), _page([])])
+    _run(setup, tmp_path)
+
+    forced_failing = FakeHttpClient(
+        [_page(_post_dicts(posts)), Err(CliError(kind=CliErrorKind.HTTP, subject="timeout"))]
+    )
+    failed = _run(forced_failing, tmp_path, force={derive_post_slug(posts[0])})
+    assert isinstance(failed, Err)
+
+    recovery = FakeHttpClient([_page(_post_dicts(posts)), (200, b"jpeg", []), _page([])])
+    result = _run(recovery, tmp_path)
+
+    assert isinstance(result, Ok)
+    assert (result.value.posts_new, result.value.posts_skipped) == (1, 0)
+    post_dir = tmp_path / "franek-k" / "announcements" / derive_post_slug(posts[0])
+    assert (post_dir / "photos" / "1.jpeg").exists()
+
+
+def test_dump_tree_modes_are_enforced(tmp_path: Path) -> None:
+    """0o700 dirs (including intermediates) and a 0o600 manifest file."""
+    posts = [_make_post(photos=[make_photo_dict()])]
+    client = FakeHttpClient([_page(_post_dicts(posts)), (200, b"jpeg", []), _page([])])
+
+    result = _run(client, tmp_path)
+
+    assert isinstance(result, Ok)
+    child_dir = tmp_path / "franek-k"
+    announcements = child_dir / "announcements"
+    common = tmp_path / "_common"
+    for d in (child_dir, announcements, common, common / "photos"):
+        assert d.stat().st_mode & 0o777 == 0o700, d
+    manifest = announcements / ".manifest.sqlite"
+    assert manifest.stat().st_mode & 0o777 == 0o600
+
+
 def test_manifest_entry_without_directory_is_redumped(tmp_path: Path) -> None:
     """Design: skip requires BOTH the manifest entry and the on-disk dir."""
     posts = [_make_post()]
@@ -220,8 +276,6 @@ def test_manifest_entry_without_directory_is_redumped(tmp_path: Path) -> None:
     assert isinstance(first, Ok)
 
     post_dir = tmp_path / "franek-k" / "announcements" / derive_post_slug(posts[0])
-    import shutil
-
     shutil.rmtree(post_dir)
 
     again = FakeHttpClient([_page(_post_dicts(posts)), _page([])])

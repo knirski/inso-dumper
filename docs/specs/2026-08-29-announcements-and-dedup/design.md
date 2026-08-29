@@ -80,9 +80,13 @@ and documents are deferred to a follow-up spec (the PRD's
   with respect to the Inso platform".)
 - Signed media URLs (`https://file.inso.pl/.../full.jpg?Expires=…
   &Signature=…&Key-Pair-Id=…`) are short-lived (~hours). The dumper
-  downloads bytes immediately after fetching the post; the URL is
-  not persisted to disk. The dump must be self-contained — re-running
-  the dumper offline must not require re-fetching from the platform.
+  downloads bytes immediately after fetching the post and must never
+  **rely on** persisted URLs: re-verification and offline reads use the
+  downloaded bytes in ``_common/``, never the URLs. (``post.json`` — the
+  verbatim platform mirror — contains the URLs with their expired
+  signatures as inert provenance; see Storage Layout.) The dump must be
+  self-contained — re-running the dumper offline must not require
+  re-fetching from the platform.
 - `dump/` is local-only, never committed, mode `0700` (existing rule
   in AGENTS.md). Photo files are `0600` (children's personal data).
 - Slug derivation rule must remain stable across runs. The foundation
@@ -300,10 +304,14 @@ Layer rules:
   symlinks. Converts `OSError` to `CliError(INTERNAL)` with
   subject = the failing path.
 - `dump/manifest.py` is the **shell** boundary for the SQLite state
-  DB. One table: `posts(post_id PRIMARY KEY, post_slug, category_id,
-  child_slug, first_seen_at, last_seen_at, media_count)`. Read on
-  every sync to skip posts already dumped (by `post_id`); write
-  after each successful post write.
+  DB. One table: `posts(post_id PRIMARY KEY, post_slug, dir_name,
+  category_id, child_slug, first_seen_at, last_seen_at, media_count)`.
+  `dir_name` records the actual (possibly collision-suffixed) directory
+  so re-runs skip on the manifest's record, not a recomputed path.
+  Read on every sync to skip posts already dumped (by `post_id`);
+  write after each successful post write. `--force` clears the row
+  (by `post_id`) before re-dumping so an interrupted forced re-dump
+  cannot be mistaken for a complete one.
 - `dump/sync.py` is the **orchestrator** — it pulls everything
   together. It is the only module that calls the `HttpClient`,
   iterates pages, downloads media, writes the manifest. The CLI
@@ -447,7 +455,7 @@ everything).
 | Parse one API page → `list[Post]`      | `http/timeline.py` (parser)   | Pure, bytes in, models out |
 | Iterate pages until exhausted          | `http/timeline.py` (shell)    | Owns the `HttpClient` and rate limit |
 | Download one media file's bytes        | `http/timeline.py` (shell)    | Owns the signed URL fetch; converts errors to `CliError(HTTP)` |
-| Atomic write, symlink                  | `dump/writer.py`              | Shell boundary; converts `OSError` to `CliError(INTERNAL)` |
+| Atomic write, symlink, post-dir resolve/recovery | `dump/writer.py`     | Shell boundary; converts `OSError` to `CliError(INTERNAL)` |
 | SQLite manifest read/write             | `dump/manifest.py`            | Shell boundary; same conversion rule |
 | Orchestrate pages → posts → media      | `dump/sync.py`                | The only module that calls the above in order |
 | CLI arg parsing, exit codes            | `cli.py`                      | Shell |
@@ -580,8 +588,8 @@ inso-dumper --help
   parser returns `Err(CliError(PLATFORM_CHANGED))` and the
   dumper stops before the manifest is touched; re-runs recover
   in place (see the target-dir rule below).
-- For each post, checks the manifest. If `post_id` is in the
-  manifest and the on-disk directory exists, skip. Otherwise:
+- For each post, checks the manifest. If `post_id` has a recorded
+  `dir_name` and that on-disk directory exists, skip. Otherwise:
   - Derive `post_target_dir`. If that directory already exists:
     - its `post.json` names the same `post_id` → a partial dump
       from an interrupted run; remove the directory and re-dump
@@ -693,6 +701,7 @@ function, the same as the foundation spec.
 # Table: posts
 #   post_id          TEXT    PRIMARY KEY     -- platform UUID; the sole dedup key
 #   post_slug        TEXT    NOT NULL        -- "<YYYY-MM-DD>-<title-slug>"
+#   dir_name         TEXT    NOT NULL        -- actual dir (may be collision-suffixed)
 #   category_id      INTEGER NOT NULL        -- 2 or 3
 #   child_slug       TEXT    NOT NULL        -- denormalised for queries
 #   first_seen_at    TEXT    NOT NULL        -- ISO-8601 UTC

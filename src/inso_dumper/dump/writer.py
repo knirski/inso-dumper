@@ -12,6 +12,7 @@ filesystems that reject symlinks get a plain copy (logged at INFO).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -22,10 +23,9 @@ from pathlib import Path
 from typing import ClassVar, assert_never
 
 from inso_dumper._result import Err, Ok
-from inso_dumper.dump.layout import dedup_target, sha256_hex
+from inso_dumper.dump.layout import dedup_target, post_target_dir, sha256_hex
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
-from inso_dumper.http.timeline import MediaItemKind
-from inso_dumper.models.timeline import Post
+from inso_dumper.models.timeline import MediaItemKind, Post
 
 log = logging.getLogger("inso_dumper.dump.writer")
 
@@ -154,6 +154,71 @@ class _PostFile:
     data: bytes
 
 
+def ensure_private_dir(path: Path, *, parents: bool = False) -> None:
+    """Create ``path`` and enforce ``0o700``.
+
+    With ``parents=False`` only the leaf is created (callers that need a
+    fully-tightened chain create each level). ``mkdir(mode=...)`` only
+    applies at creation and is umask-masked, so the explicit ``chmod``
+    is what actually enforces the invariant on pre-existing directories.
+    Raises ``OSError``.
+    """
+    path.mkdir(parents=parents, exist_ok=True, mode=_DIR_MODE)
+    os.chmod(path, _DIR_MODE)
+
+
+def _is_same_post_on_disk(target_dir: Path, post: Post) -> bool:
+    """True if ``target_dir`` holds a ``post.json`` naming the same post.
+
+    That means a partial dump from an interrupted run (the manifest was
+    never upserted) — recoverable by re-dumping in place. Anything
+    unreadable, non-UTF-8, or non-object reads as "not the same post".
+    """
+    try:
+        data = json.loads((target_dir / "post.json").read_bytes())
+        return isinstance(data, dict) and data.get("id") == post.id
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError and non-UTF-8 bytes.
+        return False
+
+
+def resolve_post_dir(
+    dump_root: Path, child_slug: str, post: Post, *, log: logging.Logger
+) -> CliResult[Path]:
+    """Pick, clean, and return the destination directory for ``post``.
+
+    - fresh path → use it;
+    - existing dir whose ``post.json`` names the same ``post_id`` → a
+      partial dump from an interrupted run; remove it and re-dump in
+      place (no orphaned ``-N`` directories);
+    - existing dir with a different/unreadable ``post.json`` → slug
+      collision; append the next ``-N`` suffix.
+
+    All disk policy for post placement lives here (the SDD assigns it
+    to the writer); the orchestrator only consumes the returned path.
+    """
+    base = post_target_dir(dump_root, child_slug, post)
+    try:
+        if not base.exists() or _is_same_post_on_disk(base, post):
+            chosen = base
+        else:
+            n = 1
+            while True:
+                candidate = base.parent / f"{base.name}-{n}"
+                if not candidate.exists() or _is_same_post_on_disk(candidate, post):
+                    chosen = candidate
+                    break
+                n += 1
+        if chosen.exists():
+            shutil.rmtree(chosen)
+            log.info("removed partial dump at %s", chosen)
+        ensure_private_dir(chosen)
+    except OSError:
+        log.warning("cannot prepare post dir under %s", base)
+        return Err(CliError(kind=CliErrorKind.INTERNAL, subject="post_dir_prepare"))
+    return Ok(chosen)
+
+
 def write_post(post: Post, target_dir: Path, *, log: logging.Logger) -> CliResult[Path]:
     """Write the per-post directory atomically: ``post.json`` first, then
     ``post.html``, then best-effort ``post.md``. Any ``OSError`` removes
@@ -166,7 +231,7 @@ def write_post(post: Post, target_dir: Path, *, log: logging.Logger) -> CliResul
     ]
     files.append(_PostFile("post.md", _to_markdown(post.content).encode("utf-8")))
     try:
-        target_dir.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        ensure_private_dir(target_dir, parents=True)
         for f in files:
             _write_bytes(target_dir / f.name, f.data, _FILE_MODE)
             log.info("wrote %s", target_dir / f.name)
@@ -200,7 +265,11 @@ def write_deduped_media(
                 return Err(CliError(kind=CliErrorKind.INTERNAL, subject="dedup_collision"))
             log.info("dedup hit %s", target)
             return Ok(target)
-        target.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        # Create and enforce each level: _common/, <kind>/, <hash[:2]>/.
+        current = dump_root
+        for part in ("_common", kind.value, hash_hex[:2]):
+            current = current / part
+            ensure_private_dir(current)
         _write_bytes(target, data)
     except OSError:
         return Err(CliError(kind=CliErrorKind.INTERNAL, subject="media_write"))
@@ -225,7 +294,7 @@ def link_media_to_post(
     link = post_dir / subdir / f"{n}{dedup_path.suffix}"
     rel_target = os.path.relpath(dedup_path, link.parent)
     try:
-        link.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        ensure_private_dir(link.parent)
         if link.exists() or link.is_symlink():
             link.unlink()
         try:
@@ -239,4 +308,4 @@ def link_media_to_post(
     return Ok(link)
 
 
-__all__ = ["link_media_to_post", "write_deduped_media", "write_post"]
+__all__ = ["ensure_private_dir", "link_media_to_post", "resolve_post_dir", "write_deduped_media", "write_post"]

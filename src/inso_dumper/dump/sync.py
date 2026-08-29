@@ -11,17 +11,21 @@ duplicate directory.
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from inso_dumper._result import Err, Ok
-from inso_dumper.dump.layout import derive_post_slug, post_target_dir, sha256_hex
+from inso_dumper.dump.layout import derive_post_slug, sha256_hex
 from inso_dumper.dump.manifest import Manifest, open_manifest
-from inso_dumper.dump.writer import link_media_to_post, write_deduped_media, write_post
+from inso_dumper.dump.writer import (
+    ensure_private_dir,
+    link_media_to_post,
+    resolve_post_dir,
+    write_deduped_media,
+    write_post,
+)
 from inso_dumper.errors import CliResult
 from inso_dumper.http.client import HttpClient
 from inso_dumper.http.timeline import MediaItemKind, download_media, list_posts
@@ -42,39 +46,6 @@ class SyncSummary:
     seconds: float
 
 
-def _is_same_post_on_disk(target_dir: Path, post: Post) -> bool:
-    """True if ``target_dir`` holds a ``post.json`` naming the same post.
-
-    That means a partial dump from an interrupted run (the manifest was
-    never upserted) — recoverable by re-dumping in place.
-    """
-    try:
-        data = json.loads((target_dir / "post.json").read_bytes())
-        return data.get("id") == post.id
-    except OSError, json.JSONDecodeError:
-        return False
-
-
-def _resolve_target_dir(dump_root: Path, child_slug: str, post: Post) -> Path:
-    """Pick the destination for ``post``.
-
-    - fresh path → use it;
-    - existing dir whose ``post.json`` names the same ``post_id`` →
-      reuse it (partial-run recovery);
-    - existing dir with a different/unreadable ``post.json`` → slug
-      collision; append the next ``-N`` suffix.
-    """
-    base = post_target_dir(dump_root, child_slug, post)
-    if not base.exists() or _is_same_post_on_disk(base, post):
-        return base
-    n = 1
-    while True:
-        candidate = base.parent / f"{base.name}-{n}"
-        if not candidate.exists() or _is_same_post_on_disk(candidate, post):
-            return candidate
-        n += 1
-
-
 async def run(
     *,
     client: HttpClient,
@@ -93,7 +64,13 @@ async def run(
     """
     start = time.monotonic()
     forced = force or set()
-    manifest_result = open_manifest(dump_root / child.slug / "announcements" / ".manifest.sqlite")
+    posts_new = posts_skipped = photos = videos = attachments = 0
+    # The writer owns the mode invariant; create the chain explicitly so
+    # every level is 0o700, then open the manifest inside it.
+    announcements_dir = dump_root / child.slug / "announcements"
+    for level in (dump_root, dump_root / child.slug, announcements_dir):
+        ensure_private_dir(level)
+    manifest_result = open_manifest(announcements_dir / ".manifest.sqlite")
     manifest: Manifest | None
     match manifest_result:
         case Err(error):
@@ -101,7 +78,6 @@ async def run(
         case Ok(value):
             manifest = value
 
-    posts_new = posts_skipped = photos = videos = attachments = 0
     try:
         async for item in list_posts(client, session, child.child_id, category):
             match item:
@@ -111,18 +87,29 @@ async def run(
                     pass
 
             post_slug = derive_post_slug(post)
-            skip_dir = dump_root / child.slug / "announcements" / post_slug
-            if manifest.already_dumped(post.id) and post_slug not in forced and skip_dir.is_dir():
-                posts_skipped += 1
-                log.info("skipping %s", post_slug)
-                continue
+            recorded = manifest.recorded_dir(post.id)
+            if recorded is not None and post_slug not in forced:
+                if (announcements_dir / recorded).is_dir():
+                    posts_skipped += 1
+                    log.info("skipping %s", post_slug)
+                    continue
 
-            target_dir = _resolve_target_dir(dump_root, child.slug, post)
-            if target_dir.exists():
-                # The only way the chosen directory exists is partial-run
-                # recovery (same post_id in its post.json) — start clean.
-                shutil.rmtree(target_dir)
-                log.info("removed partial dump at %s", target_dir)
+            if post_slug in forced:
+                # Drop the stale row first so an interrupted forced
+                # re-dump cannot be mistaken for a complete one later.
+                cleared = manifest.force_clear(post.id)
+                match cleared:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(_):
+                        pass
+
+            resolved = resolve_post_dir(dump_root, child.slug, post, log=log)
+            match resolved:
+                case Err(error):
+                    return Err(error)
+                case Ok(target_dir):
+                    pass
 
             written = write_post(post, target_dir, log=log)
             match written:
@@ -156,7 +143,9 @@ async def run(
                 post_counts[kind] += 1
 
             media_count = sum(post_counts.values())
-            upserted = manifest.upsert(post, child.slug, post_slug, category.api_id, media_count)
+            upserted = manifest.upsert(
+                post, child.slug, post_slug, target_dir.name, category.api_id, media_count
+            )
             match upserted:
                 case Err(error):
                     return Err(error)

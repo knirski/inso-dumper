@@ -241,9 +241,11 @@ def _categories_for(choice: SyncCategory) -> list[Category]:
 
 
 def _ensure_dump_root(root: Path) -> CliResult[Path]:
-    """Create the dump root (0o700); a bad path is a user/config error."""
+    """Create the dump root (0o700, re-tightened if it pre-exists); a bad
+    path is a user/config error."""
     try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(root, 0o700)
     except OSError:
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="dump_root"))
     return Ok(root)
