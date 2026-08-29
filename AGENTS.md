@@ -44,12 +44,26 @@ explicitly justified in the spec that introduces it.
 - **Data classes:** prefer `@dataclass(frozen=True, slots=True)` for
   immutable value objects. Use `StrEnum` for closed string sets
   (error kinds, content types, etc.).
-- **Functional core / imperative shell:** keep policy, parsing,
-  validation, and state transitions pure and deterministic; keep
-  filesystem, process, environment, clock, network, and terminal
-  effects at thin, explicit boundaries. CLI entrypoints are
-  responsible only for argument parsing, effect orchestration,
-  presentation, and exit codes.
+- **Functional core / imperative shell:** the **functional core** is
+  pure: parsing, validation, normalization, slug derivation, response
+  decoding, error mapping. The core has no IO, no `try/except` for
+  control flow, no `httpx` / `os` / `pathlib` calls, no `print`, no
+  logging beyond typed return values. It lives in `models/`, in the
+  pure helpers of `http/auth.py` and `http/children.py`
+  (`build_login_payload`, `parse_login_response`, `parse_children_list`),
+  and in `errors.py` / `_result.py`. The **imperative shell** is
+  everything else: `http/client.py` (sockets), `session/store.py`
+  (disk), `cli.py` (terminal), and the *shell* functions in
+  `http/auth.py` and `http/children.py` that orchestrate shell calls
+  into `Result`-typed outcomes. The shell catches `httpx.HTTPError`,
+  `OSError`, and friends and converts them to the relevant `CliError`
+  variant at the boundary — it never re-raises, and the core never
+  sees those exceptions. CLI entrypoints are responsible only for
+  argument parsing, effect orchestration, presentation, and exit
+  codes; no business logic in the CLI. A single outer `try/except
+  Exception` in `cli.py` is allowed only as the last-resort safety
+  net that returns exit 99 (`INTERNAL`); see the "Result type" rule
+  below for the result-typed return that every other function uses.
 - **Typed results over exceptions for control flow:** functions that
   can fail in expected, recoverable ways return
   `Result[ValueT, ErrorT]` (see "Result type" below) instead of
