@@ -140,7 +140,7 @@ def test_login_returns_auth_err_when_no_phpsessid_in_chain() -> None:
 
 
 def test_login_stops_after_max_redirects() -> None:
-    """A redirect loop must not hang the CLI."""
+    """A redirect loop must not hang the CLI; exit kind is HTTP, not AUTH."""
     client = _FakeClient(
         [
             _ok(200),
@@ -152,8 +152,11 @@ def test_login_stops_after_max_redirects() -> None:
     import asyncio
 
     result = asyncio.run(login(client, cfg, "u@x", "p"))  # type: ignore[arg-type]
-    # The shell gives up after a small cap; the outcome is some Err variant.
     assert isinstance(result, Err)
+    # A redirect storm is a server-side / protocol anomaly, not bad
+    # credentials — exit kind must be HTTP, not AUTH.
+    assert result.error.kind is CliErrorKind.HTTP
+    assert result.error.subject == "redirect_loop"
 
 
 def test_login_no_raise_statements() -> None:

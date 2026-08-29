@@ -24,9 +24,11 @@ _USER_UUID_RE: Final = re.compile(
 )
 
 # Set-Cookie value: ``PHPSESSID=<opaque>`` possibly quoted. The opaque
-# value runs to the next semicolon, comma, or whitespace.
+# value runs to the next semicolon, comma, or whitespace. RFC 6265
+# allows the value to be either a token or a quoted-string; we strip
+# surrounding quotes so the captured value is usable as a cookie.
 _PHPSESSID_RE: Final = re.compile(
-    r"PHPSESSID\s*=\s*(\"[^\"]*\"|[^;,\s]+)",
+    r'PHPSESSID\s*=\s*(?:"(?P<quoted>[^"]*)"|(?P<token>[^;,\s]+))',
     re.IGNORECASE,
 )
 
@@ -47,7 +49,8 @@ def _extract_phpsessid(headers: Sequence[tuple[str, str]]) -> str | None:
             continue
         m = _PHPSESSID_RE.search(value)
         if m:
-            return m.group(1)
+            # Quoted-string wins if matched; otherwise the token.
+            return m.group("quoted") if m.group("quoted") is not None else m.group("token")
     return None
 
 

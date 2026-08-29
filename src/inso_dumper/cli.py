@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+from logging import Logger
 from pathlib import Path
 from typing import Any, NoReturn, assert_never
 
@@ -221,7 +222,7 @@ def _child_to_dict(c: Any) -> dict[str, Any]:
     }
 
 
-def _die(err: CliError, log: Any) -> NoReturn:
+def _die(err: CliError, log: Logger) -> NoReturn:
     log.error("%s", _format_error(err))
     console_err.print(_format_error(err), style="red")
     raise typer.Exit(exit_code_for(err))

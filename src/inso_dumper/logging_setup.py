@@ -30,7 +30,15 @@ _REDACTED = "<redacted>"
 
 
 class TokenRedactingFilter(logging.Filter):
-    """Scrub sensitive values from log record messages."""
+    """Scrub sensitive values from log record messages AND tracebacks.
+
+    The stdlib's ``Handler.format`` calls ``record.getMessage()`` (which
+    we scrub) and then appends ``record.exc_text``. Without scrubbing
+    ``exc_text`` here, an exception that embeds a ``Session`` (e.g.
+    via f-string or pydantic repr) in its message would write the
+    PHPSESSID to stderr in the traceback. We scrub exc_text at filter
+    time so the formatter sees the redacted version.
+    """
 
     @staticmethod
     def _scrub(text: str) -> str:
@@ -52,6 +60,9 @@ class TokenRedactingFilter(logging.Filter):
                 scrubbed = self._scrub(rendered)
                 record.msg = scrubbed
                 record.args = ()
+        # Scrub exception traceback text if present.
+        if record.exc_text:
+            record.exc_text = self._scrub(record.exc_text)
         return True
 
 

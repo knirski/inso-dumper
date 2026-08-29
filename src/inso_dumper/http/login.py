@@ -89,8 +89,10 @@ async def login(
             case Ok(response):
                 current = response
     else:
-        # Loop exhausted without a 200 final response.
-        return Err(CliError(kind=CliErrorKind.AUTH, subject="redirect_loop"))
+        # Loop exhausted without a 200 final response. The server is
+        # misbehaving (a redirect storm is closer to a transport /
+        # protocol anomaly than to bad credentials), so this is HTTP.
+        return Err(CliError(kind=CliErrorKind.HTTP, subject="redirect_loop"))
 
     # 4. Build a synthetic final response that includes the accumulated
     # Set-Cookie headers, then decode.

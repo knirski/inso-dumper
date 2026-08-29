@@ -80,9 +80,11 @@ def _load_from_path(path: Path) -> CliResult[Session]:
 def load_session(path: Path) -> CliResult[Session]:
     """Load and validate the session file at ``path``.
 
-    Returns ``Err(CONFIG)`` if the file is missing, unparseable, or has
-    a different ``schema_version``. Callers that need to distinguish
-    "no file" from "config error" should use ``maybe_load_session``.
+    Returns ``Err(CONFIG, session_schema)`` if the file is missing,
+    unparseable, or has a different ``schema_version``. A missing file
+    is intentionally bucketed as CONFIG (not SESSION_EXPIRED) — the
+    CLI's ``ensure_session_loaded`` helper uses ``maybe_load_session``
+    instead and translates "no file" to SESSION_EXPIRED.
     """
     if not path.is_file():
         return Err(CliError(kind=CliErrorKind.CONFIG, subject="session_schema"))

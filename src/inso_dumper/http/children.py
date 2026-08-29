@@ -142,11 +142,12 @@ def parse_children_list(html: str) -> CliResult[list[Child]]:
     Empty menu → ``Ok([])``. Missing menu → ``Err(PLATFORM_CHANGED)``.
     """
     parser = _MenuParser()
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception:  # malformed HTML shouldn't crash the CLI
-        return Err(CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"))
+    # stdlib's HTMLParser does not raise on malformed markup — it
+    # silently records errors and continues. Programmer errors (bugs
+    # in this module) propagate to the CLI's last-resort safety net
+    # as INTERNAL, which is the correct classification.
+    parser.feed(html)
+    parser.close()
     if not parser.found_menu:
         return Err(CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="children_list"))
     return Ok(parser.children)
