@@ -46,12 +46,18 @@ def build_login_payload(email: str, password: str) -> Mapping[str, str]:
 
 
 def _extract_phpsessid(headers: Sequence[tuple[str, str]]) -> str | None:
-    for name, value in headers:
+    # The login shell concatenates the final response's Set-Cookie
+    # headers with the accumulated cookies from earlier redirects
+    # (login.py:99-103). The final response's headers come first; the
+    # historical cookies come after. The contract is "latest value
+    # wins" — if the server rotated the cookie on a later redirect,
+    # we persist the rotated value, not the stale one. Iterate in
+    # reverse and return the first match.
+    for name, value in reversed(headers):
         if name.lower() != "set-cookie":
             continue
         m = _PHPSESSID_RE.search(value)
         if m:
-            # Quoted-string wins if matched; otherwise the token.
             return m.group("quoted") if m.group("quoted") is not None else m.group("token")
     return None
 

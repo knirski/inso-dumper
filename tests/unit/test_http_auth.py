@@ -88,7 +88,7 @@ def test_parse_login_response_invalid_uuid_returns_auth_err() -> None:
             "xyz123",
         ),
         (
-            'PHPSESSID="quoted-value"; path=/',
+            "PHPSESSID=\"quoted-value\"; path=/",
             "quoted-value",  # surrounding quotes are stripped
         ),
     ],
@@ -107,3 +107,26 @@ def test_parse_login_response_extracts_phpsessid_from_set_cookie(
     )
     assert isinstance(result, Ok)
     assert result.value.phpsessid == expected_sid
+
+
+def test_parse_login_response_picks_latest_phpsessid_when_rotated() -> None:
+    """If a later redirect rotated the cookie, the latest value must win.
+
+    The shell concatenates Set-Cookie headers in response order
+    (final first, historical last). The parser scans in reverse so the
+    rotated cookie takes precedence over the original.
+    """
+    response = Response(
+        status=200,
+        body=b"",
+        headers=(
+            ("Set-Cookie", "PHPSESSID=original; path=/; HttpOnly"),
+            ("Set-Cookie", "PHPSESSID=rotated; path=/; HttpOnly"),
+        ),
+    )
+    result = parse_login_response(
+        response,
+        final_url="https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782/",
+    )
+    assert isinstance(result, Ok)
+    assert result.value.phpsessid == "rotated"
