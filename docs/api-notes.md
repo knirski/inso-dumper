@@ -100,8 +100,8 @@ https://app.inso.pl/panel/home/<child-uuid>/
 ```
 
 `<child-uuid>` is a v4-style UUID, e.g.
-`eea48660-3740-11ed-a611-06dd2728d782` (Ignacy) and
-`a703dc5a-042d-4122-96e8-4c5111e5f7cf` (Liliana). The UUID is stable
+`eea48660-3740-11ed-a611-06dd2728d782` (Franek) and
+`a703dc5a-042d-4122-96e8-4c5111e5f7cf` (Zofia). The UUID is stable
 across sessions and is the canonical child identifier.
 
 ### Sidebar markup that exposes children
@@ -110,11 +110,11 @@ across sessions and is the canonical child identifier.
 <el-menu id="menu-0" role="menu">
   <a href="https://app.inso.pl/panel/home/<uuid-1>" id="item-2" role="menuitem">
     <div style="background-color: #FCCC34;"><span>IG</span></div>
-    <span>Ignacy</span>
+    <span>Franek</span>
   </a>
   <a href="https://app.inso.pl/panel/home/<uuid-2>" id="item-3" role="menuitem">
     <div style="background-color: #A9CC63;"><span>LI</span></div>
-    <span>Liliana</span>
+    <span>Zofia</span>
   </a>
   <a href="/panel/add-child" id="item-4" role="menuitem">
     <div><i class="fal fa-plus"></i></div>
@@ -132,7 +132,7 @@ spike found in the markup. Revised fields:
 | --- | --- | --- |
 | `child_id` | UUID segment of `/panel/home/<uuid>/` | `str` |
 | `first_name` | `<span>` inside the `<a>` menu item | `str` |
-| `last_name` | not present in the spike's two children; appears in the URL slugs of `/messages?child=<uuid>` and `/timeline/child/<uuid>` page titles. The spike's home page title was "Podsumowanie - Nirski Ignacy - Inso" — full name is available on the dashboard. | `str` |
+| `last_name` | not present in the spike's two children; appears in the URL slugs of `/messages?child=<uuid>` and `/timeline/child/<uuid>` page titles. The spike's home page title was "Podsumowanie - Kowalski Franek - Inso" — full name is available on the dashboard. | `str` |
 | `group` | the home page title does not include a group; sidebar items don't either. The group name is likely on a per-child profile page that the spike did not visit. | `str \| None` (kept from spec) |
 | `avatar_color` | the `<div style="background-color: #XXXXXX;">` in each menu item | `str` (CSS hex) |
 | `initials` | `<span>` inside the avatar div, e.g. `IG`, `LI` | `str` |
