@@ -142,17 +142,13 @@ def test_save_session_keeps_real_file_intact_on_replace_failure(
     assert path.exists()
 
 
-def test_save_session_loops_on_short_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_save_session_loops_on_short_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """os.write may return fewer bytes than requested; the loop continues."""
     path = tmp_path / "session.json"
     real_write = os.write
     call_count = {"n": 0}
 
-    def first_call_short(
-        fd: int, data: bytes | memoryview, *args: object, **kwargs: object
-    ) -> int:
+    def first_call_short(fd: int, data: bytes | memoryview, *args: object, **kwargs: object) -> int:
         call_count["n"] += 1
         if call_count["n"] == 1:
             return real_write(fd, bytes(data[: len(data) // 2]))

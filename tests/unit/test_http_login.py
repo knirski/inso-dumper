@@ -135,7 +135,14 @@ def test_login_accepts_final_response_at_max_redirects() -> None:
             _ok(302, b"", [("Location", "/r2")]),
             _ok(302, b"", [("Location", "/r3")]),
             _ok(302, b"", [("Location", "/r4")]),
-            _ok(302, b"", [("Set-Cookie", cookie), ("Location", "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/")]),
+            _ok(
+                302,
+                b"",
+                [
+                    ("Set-Cookie", cookie),
+                    ("Location", "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/"),
+                ],
+            ),
             # The 6th request (after the 5th redirect) is the final response.
             _ok(200, b"<html>dashboard</html>"),
         ]

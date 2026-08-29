@@ -112,9 +112,7 @@ async def login(
         # Off-domain redirect is a server anomaly: return HTTP so the
         # user is told the platform sent us somewhere unexpected.
         if not _is_same_origin(last_url, base):
-            return Err(
-                CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect")
-            )
+            return Err(CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect"))
         # Strip the base prefix; handle the empty case explicitly.
         path = last_url[len(base) :]
         if not path:
@@ -132,12 +130,8 @@ async def login(
         # allowed redirect. If it is itself a followable redirect, the
         # server is in a loop and we surface HTTP. If it is the final
         # response (e.g. HTTP 200), fall through to the parser.
-        if current.status in _REDIRECT_STATUSES and _header_value(
-            current.headers, "location"
-        ):
-            return Err(
-                CliError(kind=CliErrorKind.HTTP, subject="redirect_loop")
-            )
+        if current.status in _REDIRECT_STATUSES and _header_value(current.headers, "location"):
+            return Err(CliError(kind=CliErrorKind.HTTP, subject="redirect_loop"))
 
     # 4. Build a synthetic final response that includes the accumulated
     # Set-Cookie headers, then decode.

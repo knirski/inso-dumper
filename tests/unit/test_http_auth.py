@@ -88,7 +88,7 @@ def test_parse_login_response_invalid_uuid_returns_auth_err() -> None:
             "xyz123",
         ),
         (
-            "PHPSESSID=\"quoted-value\"; path=/",
+            'PHPSESSID="quoted-value"; path=/',
             "quoted-value",  # surrounding quotes are stripped
         ),
     ],
