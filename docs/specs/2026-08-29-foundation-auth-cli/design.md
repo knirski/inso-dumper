@@ -28,7 +28,7 @@ Everything beyond that (announcements, messages, documents, dedup, indexes,
   - Session store under `~/.local/state/inso-dumper/`.
   - Auth against app.inso.pl driven by the documented discovery spike
     (`docs/api-notes.md`).
-  - `login` command — validate credentials, persist a refreshable session.
+  - `login` command — validate credentials, persist a server-side session (PHPSESSID) for re-use.
   - `children` command — list children of the authenticated account with a
     stable slug per child.
   - Minimal HTTP client abstraction so a later switch from a JSON-API
@@ -90,12 +90,14 @@ Everything beyond that (announcements, messages, documents, dedup, indexes,
 
 ```
 inso-dumper login
-   → config.load()                     # TOML + env, secrets from env
-   → client.authenticate(creds)        # httpx against discovered endpoint
-   → session.save(refreshable_blob)    # to ~/.local/state/inso-dumper/session.json
+   → config.load()                              # TOML + env, secrets from env
+   → client.POST("/login", form=credentials)    # httpx against /login
+   → parse_login_response(set_cookie)           # pure: extract PHPSESSID
+   → session.save()                             # to ~/.local/state/inso-dumper/session.json
 inso-dumper children
-   → session.load() → refresh if expired
-   → client.list_children()            # against discovered endpoint
+   → session.load()                             # validate (re-login if invalid)
+   → client.GET("/panel/home/<user_uuid>/")     # any logged-in page works
+   → parse_children_list(html)                  # pure: extract <el-menu> children
    → children_table(rich)
    → exit 0
 ```
@@ -125,14 +127,20 @@ a **required input** before this spec's code is written. See
 
 ### Gotchas, assumptions, technical debt
 
-- **Assumption:** the platform exposes a JSON API the `agent-browser` spike
-  will find. If the spike finds a server-rendered or heavily-SPA-only app,
-  the auth path forks to a browser-driven implementation (see
-  [Architecture](#architecture) — the `HttpClient` port is designed for
-  this).
-- **Assumption:** the session can be refreshed without interactive 2FA
-  most of the time. 2FA handling is explicitly out of scope for v1 and
-  re-listed in [Open Questions](#open-questions) as a known follow-up.
+- **Resolved (see `docs/api-notes.md`):** the platform is a server-rendered
+  PHP application behind Cloudflare, with **no JSON API** for parent
+  content. Auth is a single form POST returning one `HttpOnly PHPSESSID`
+  cookie; the children list is embedded in the HTML of any logged-in
+  page. The `HttpClient` Protocol is still useful (HTML page fetches
+  parse children out of the sidebar), but the spike picked the
+  "HTML scrape" path of the Phase 0 decision point, not the "JSON
+  API" path.
+- **Assumption:** the session remains valid until the server expires
+  it. There is no client-side refresh path — the v1 `children` command
+  validates by attempting a real fetch and exits 4 with a clear
+  "run `inso-dumper login`" message if `PHPSESSID` is gone. 2FA is
+  not encountered on the spike's account; see
+  [Open Questions](#open-questions) for the deferred-2FA case.
 - The PRD does not specify the children-listing endpoint, so the slug
   derivation rule and what fields appear are designed in this spec from
   the minimum the parent needs to identify a child.
@@ -159,7 +167,7 @@ inso_dumper/
 ├── http/
 │   ├── __init__.py
 │   ├── client.py              # HttpClient Protocol + HttpxClient impl (shell)
-│   ├── auth.py                # login + refresh flows (shell)
+│   ├── auth.py                # login flow (shell)
 │   └── children.py            # list_children (shell)
 ├── models/
 │   ├── __init__.py
@@ -206,17 +214,21 @@ import re
 
 @dataclass(frozen=True)
 class Child:
-    child_id: str          # opaque platform id; kept for API calls
-    first_name: str
-    last_name: str
-    group: str | None      # e.g. "Biedronki"; None if API doesn't return it
+    child_id: str          # UUID from /panel/home/<uuid>/ URL
+    first_name: str        # from the sidebar's <span>Ignacy</span>
+    last_name: str         # discovered lazily; empty until fetched
+    group: str | None      # e.g. "Biedronki"; spike did not surface it
+    avatar_color: str      # CSS hex, e.g. "#FCCC34"; from sidebar style
+    initials: str          # e.g. "IG"; from sidebar avatar <span>
 
     @property
     def slug(self) -> str:
-        # Example: "anna-kowalska".
+        # Example: "ignacy" (no last name yet) or "ignacy-n" once last
+        # name is filled in. Last-name discovery is a follow-up; the
+        # foundation accepts the no-last-name slug.
         first = _ascii_fold(self.first_name).lower()
-        last = _ascii_fold(self.last_name).lower() if self.last_name else ""
-        base = f"{first}-{last}" if last else first
+        last_initial = _ascii_fold(self.last_name[:1]).lower() if self.last_name else ""
+        base = f"{first}-{last_initial}" if last_initial else first
         return _SLUG_RE.sub("-", base).strip("-") or "child"
 
     @property
@@ -224,20 +236,31 @@ class Child:
         return f"{self.first_name} {self.last_name}".strip()
 ```
 
-Slugs are stable across runs (deterministic) and human-readable.
+`last_name` is a known gap. The spike's sidebar markup only carries
+the first name; the page title (`"Podsumowanie - Nirski Ignacy - Inso"`)
+has the full name. Lazy discovery (one extra page per child) is
+acceptable; for the foundation `list_children` the slug is just
+`firstname` and the directory will be `children/ignacy/`. The
+follow-up `announcements-and-dedup` spec should fill `last_name` on
+first sync.
 
 ```python
 # models/session.py
 class Session(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    user_id: str
-    cookies: dict[str, str]            # platform session cookies
-    bearer_token: str | None = None    # if platform uses JWT
-    refresh_token: str | None = None
-    expires_at: datetime               # UTC; refresh before this
-    csrf_token: str | None = None
-    raw_metadata: dict[str, Any]       # opaque passthrough for future fields
+    schema_version: Literal[1] = 1
+    phpsessid: str                    # the value of PHPSESSID cookie
+    user_uuid: str                    # post-login landing UUID
+    expires_at: datetime | None = None  # unknown; validate on every load
 ```
+
+The draft `cookies: dict`, `bearer_token`, `refresh_token`, `csrf_token`,
+and `raw_metadata` fields from earlier revisions are dropped — the
+spike confirmed the platform uses one HttpOnly session cookie and
+nothing else. `expires_at` is `None` until the spike in the
+`announcements-and-dedup` spec measures the real server-side lifetime.
+
+Slugs are stable across runs (deterministic) and human-readable.
 
 ```python
 # models/config.py
@@ -255,25 +278,22 @@ class Config(BaseModel):
 | Concern | Location | Why |
 | --- | --- | --- |
 | Slug derivation | `models/children.py` (`Child.slug`) | Pure function on a value object |
-| Cookie expiry math | `models/session.py` (`Session.is_expired`) | Pure predicate |
-| Login payload construction | `http/auth.py` (function `build_login_payload(email, password) -> dict`) | Pure transform of credentials to platform's expected shape |
-| Login response parsing | `http/auth.py` (function `parse_login_response(body: bytes) -> Session`) | Pure parse; no IO |
-| `httpx` call against `/api/login` | `http/client.py` (`HttpxClient`) | The only place that opens sockets |
+| Login form payload construction | `http/auth.py` (`build_login_payload`) | Pure transform of credentials to platform's expected shape |
+| Login response → `Session` | `http/auth.py` (`parse_login_response`) | Pure parse; no IO |
+| Sidebar HTML → `list[Child]` | `http/children.py` (`parse_children_list`) | Pure parse; no IO |
+| `httpx` calls (POST `/login`, GET `/panel/home/<uuid>/`) | `http/client.py` (`HttpxClient`) | The only place that opens sockets |
 | File read/write of `session.json` | `session/store.py` | The only place that touches disk |
 | CLI arg parsing, exit codes | `cli.py` | Shell |
 | `rich` table formatting of children | `cli.py` (or a `presenters/` helper if it grows) | Shell |
 
 ### Why a `Protocol` for `HttpClient` (v1 cost paid for v2)
 
-The PRD's Phase 0 decision point says:
-
-> JSON API exists → Python httpx client (default).
-> API too opaque → fall back to browser-driven scraping
-> (agent-browser in a long-lived session, `--session-name inso`).
-
-The first spec ships the JSON path. To avoid rewriting every caller when
-the spike forces a browser fallback, `HttpClient` is a `Protocol` with the
-single method:
+The spike (`docs/api-notes.md`) picked the "HTML scrape" branch of
+`plan.md` Phase 0's decision point. The HttpClient Protocol is still
+valuable: the foundation needs to `POST /login` and `GET
+/panel/home/<uuid>/`, and future specs will fetch many more URLs.
+To avoid a re-plumbing when the next constraint forces a fallback,
+`HttpClient` is a `Protocol`:
 
 ```python
 class HttpClient(Protocol):
@@ -282,7 +302,7 @@ class HttpClient(Protocol):
         method: str,
         path: str,
         *,
-        json: dict | None = None,
+        form: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Response: ...
 
@@ -291,12 +311,15 @@ class Response:
     status: int
     body: bytes
     headers: Mapping[str, str]
-    def json(self) -> Any: ...
+    def text(self) -> str: ...
 ```
 
-`HttpxClient` implements it. A future `BrowserClient` (subclass of nothing,
-same Protocol) replaces it in `cli.py` only. The decision to pay this cost
-now is justified by the PRD explicitly enumerating both paths.
+`HttpxClient` implements it. The follow-up spec for
+`announcements-and-dedup` may add a `CurlClient` (subprocess, real TLS
+fingerprint) or a `BrowserClient` (agent-browser) implementation if
+the Cloudflare 403 problem documented in `api-notes.md` turns out to
+block `httpx` in production. The Protocol keeps that decision
+contained to one module.
 
 ## API Design
 
@@ -313,24 +336,33 @@ inso-dumper --help
 
 - Reads `INSO_EMAIL` and `INSO_PASSWORD` from the env. If either is missing,
   prints a one-line error pointing at the env vars and exits 2.
-- Performs the discovered login exchange (one POST, possibly a follow-up
-  cookie/csrf exchange — the spike decides).
+- POSTs to `https://app.inso.pl/login` with
+  `Content-Type: application/x-www-form-urlencoded`, body
+  `_username=<email>&_password=<password>`, no CSRF token, no custom
+  auth headers (per `docs/api-notes.md`).
+- Captures `Set-Cookie: PHPSESSID=<opaque>` from the 302 response.
 - Saves the resulting `Session` to `~/.local/state/inso-dumper/session.json`
-  with `0600` perms. Refuses to save if the platform response is missing
-  `expires_at` or any field the `Session` model requires.
-- Prints `OK` to stdout on success. Prints the platform `user_id` and
-  expiry timestamp at `INFO` level.
-- On auth failure (HTTP 401/403), exits 3 with a redacted message.
+  with `0600` perms.
+- Prints `OK` to stdout on success. Prints the platform `user_uuid` and
+  any debuggable session fields at `INFO` level (the cookie value itself
+  is redacted by the log filter).
+- On auth failure (HTTP 401/403, missing `PHPSESSID` in the response,
+  Cloudflare 403), exits 3 with a redacted message.
 
 `children`:
 
-- Loads the saved `Session`. If expired, attempts one refresh. If refresh
-  fails, exits 4 with a clear "run `inso-dumper login`" message.
-- Calls the discovered "list children" endpoint.
+- Loads the saved `Session`. If `phpsessid` is missing or the file is
+  missing entirely, exits 4 with a clear "run `inso-dumper login`"
+  message. (No refresh — PHP sessions are server-side; v1 always
+  re-validates by attempting a real fetch.)
+- GETs `https://app.inso.pl/panel/home/<user_uuid>/` (any logged-in
+  page works; this is the cheapest one).
+- Parses the `<el-menu id="menu-0">` block from the response HTML and
+  returns `list[Child]`.
 - Prints a `rich` table: `Slug | Name | Group`. Exits 0.
 - `--json` prints the same data as JSON for scripting; the JSON shape
-  matches the `Child` pydantic model (`child_id`, `first_name`, `last_name`,
-  `group`, `slug`, `display_name`).
+  matches the `Child` model (`child_id`, `first_name`, `last_name`,
+  `group`, `avatar_color`, `initials`, `slug`, `display_name`).
 
 ### Config surface
 
@@ -395,7 +427,7 @@ from dataclasses import dataclass
 class CliErrorKind(StrEnum):
     CONFIG = "config"               # exit 2 — bad/missing config or env
     AUTH = "auth"                   # exit 3 — login rejected
-    SESSION_EXPIRED = "session_expired"  # exit 4 — refresh failed; run `login`
+    SESSION_EXPIRED = "session_expired"  # exit 4 — saved PHPSESSID no longer works; run `login`
     HTTP = "http"                   # exit 5 — transport-level failure
     PLATFORM_CHANGED = "platform_changed"  # exit 6 — payload shape drift
     INTERNAL = "internal"           # exit 99 — unclassified (should not happen)
@@ -442,18 +474,14 @@ The PRD's SQLite state DB is **not** part of this spec. v1 only persists
 a single `Session` JSON file. The state DB appears in the announcements
 spec.
 
-`session.json` shape:
+`session.json` shape (per the spike — `docs/api-notes.md`):
 
 ```json
 {
   "schema_version": 1,
-  "user_id": "...",
-  "cookies": {"sessionid": "..."},
-  "bearer_token": null,
-  "refresh_token": null,
-  "expires_at": "2026-08-30T12:00:00Z",
-  "csrf_token": null,
-  "raw_metadata": {}
+  "phpsessid": "d9f828d2629433b8d1b9690a17d477e3",
+  "user_uuid": "eea48660-3740-11ed-a611-06dd2728d782",
+  "expires_at": null
 }
 ```
 
@@ -512,29 +540,51 @@ the loader warns and re-tightens.
 
 ## Open Questions
 
-These block implementation and are resolved by the **discovery spike** in
-`docs/api-notes.md` before the first line of code is written. The spike
-itself is tracked as a discrete step in `plan.md` Phase 0; this spec
-records what it must produce.
+The discovery spike in `docs/api-notes.md` answered most of the
+original open questions. The remaining items below are unblocked by
+the spike but **not** by the foundation spec itself — they are
+deferred to follow-up specs.
 
-1. **Auth mechanism** — does app.inso.pl accept a `POST /api/login` (form
-   or JSON) returning a cookie + bearer, or does it require a
-   server-rendered form post, or is the session purely a `localStorage`
-   JWT (in which case `HttpxClient` cannot satisfy the Protocol and we
-   need `BrowserClient` from day one)?
-2. **Children endpoint** — exact path, request shape, and response JSON
-   schema. The `Child` pydantic model in this spec is a candidate and
-   gets adjusted to match.
-3. **CSRF** — is there a CSRF token? When? Header name?
-4. **Refresh** — is there a refresh endpoint, or does the bearer/JWT
-   have its own long expiry with re-login only?
-5. **2FA** — is 2FA mandatory for any account, or only some? Out of
-   scope for v1; if the user can't get past login without 2FA, this spec
-   is unblocked by the user disabling 2FA for testing (documented in the
-   `login` command's README section) or escalated to a follow-up spec.
-6. **Rate limit on login** — brute-force protection may force a delay
-   between retries; the spec's `rate_limit_per_second` should be applied
-   to login too.
+**Resolved by the spike (see `docs/api-notes.md`):**
+
+1. ✅ Auth mechanism: form POST to `/login` with `_username` /
+   `_password`, no CSRF, returns `Set-Cookie: PHPSESSID=<opaque>;
+   httponly; samesite=lax`.
+2. ✅ Children endpoint: there is no JSON endpoint. Children are
+   embedded in the `<el-menu id="menu-0">` block of any logged-in
+   page; URL pattern is `/panel/home/<child-uuid>`.
+3. ✅ CSRF: none. The login POST is unprotected (single-step auth).
+4. ✅ Refresh: none. PHP sessions are server-side; re-login on
+   expiry.
+5. ✅ 2FA: not encountered on the test account. May appear on
+   other accounts; see *still open* below.
+6. ✅ Rate limit on login: not measured; the login request is one
+   round-trip and the spec's `rate_limit_per_second` (3.0 default)
+   is the floor.
+
+**Still open (deferred):**
+
+7. **Cloudflare bot management** — a plain `httpx` POST is
+   rejected with HTTP 403 by Cloudflare's bot management in the
+   spike environment. `curl` and the agent-browser-driven
+   Chromium succeed. The follow-up `announcements-and-dedup` spec
+   must decide which HTTP client path to use and may need to
+   swap `HttpxClient` for `CurlClient` or `BrowserClient`.
+8. **Session lifetime** — the spike did not measure how long
+   `PHPSESSID` stays valid. The foundation treats `expires_at`
+   as `None` and re-validates on every load. The
+   `announcements-and-dedup` spec should measure and pin a
+   value.
+9. **2FA on accounts other than the spike's** — out of scope
+   for v1; the `login` command has no `NEEDS_2FA` exit-code
+   variant. If the user's account acquires 2FA, the
+   `login` command needs an interactive prompt path. Documented
+   as a known follow-up.
+10. **`Child.last_name` discovery** — the sidebar markup only
+    carries the first name. The follow-up `announcements-and-dedup`
+    spec should add lazy discovery (one extra page per child) to
+    fill this field. Until then, the slug is `firstname-<initial>`
+    only when the initial is known, else just `firstname`.
 
 ### Decomposition reminder
 

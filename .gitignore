@@ -1,0 +1,3 @@
+# Captured HTTP traffic from the discovery spike. Contains session cookies
+# and auth headers. Never commit.
+docs/api-notes/har/
