@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import IntEnum, StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
@@ -72,22 +72,35 @@ class Photo(BaseModel):
         return ext_from(self.name, str(self.src.full))
 
 
+class VideoSource(BaseModel):
+    """Video sources carry ``mp4`` + ``thumb`` (no ``full``) — verified
+    against live traffic Aug 2026; see the videos gotcha."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    thumb: HttpUrl
+    mp4: HttpUrl
+
+
 class Video(BaseModel):
-    """Working assumption — no video-bearing post was captured by the
-    spike (``videos`` was always ``[]``). The shape mirrors the photo
-    item, the closest captured analog. A video-bearing post must be
-    captured and this model confirmed before a video-dumping release;
-    ``extra="forbid"`` makes a mismatched real shape fail loud."""
+    """Videos ride inside ``media.photos[]`` with ``type: "video"`` and
+    ``src: {mp4, thumb}`` (the dedicated ``media.videos`` array exists
+    but is observed always empty). Shape verified against a real
+    video-bearing post captured Aug 2026 — see api-notes.md."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     type: Literal["video"]
     name: str
-    src: PhotoSource
+    src: VideoSource
+
+    @property
+    def url(self) -> str:
+        return str(self.src.mp4)
 
     @property
     def ext(self) -> str:
-        return ext_from(self.name, str(self.src.full))
+        return ext_from(self.name, self.url)
 
 
 class Attachment(BaseModel):
@@ -101,11 +114,17 @@ class Attachment(BaseModel):
         return ext_from(self.name, str(self.url))
 
 
+MediaItem = Annotated[Photo | Video, Field(discriminator="type")]
+
+
 class Media(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    photos: list[Photo] = Field(default_factory=list)
-    videos: list[Video] = Field(default_factory=list)
+    # Photos AND videos arrive here, discriminated by ``type``.
+    photos: list[MediaItem] = Field(default_factory=list)
+    # Present-but-observed-always-empty; kept so extra="forbid" accepts
+    # the captured envelope. Tighten if the platform ever populates it.
+    videos: list[object] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list)
 
 
@@ -161,10 +180,12 @@ __all__ = [
     "Attachment",
     "Category",
     "Media",
+    "MediaItem",
     "MediaItemKind",
     "Photo",
     "PhotoSource",
     "Post",
     "Video",
+    "VideoSource",
     "ext_from",
 ]

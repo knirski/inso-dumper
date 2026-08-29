@@ -74,8 +74,8 @@ def make_video_dict(name: str = "klip.mp4") -> dict[str, Any]:
         "type": "video",
         "name": name,
         "src": {
+            "mp4": f"https://file.inso.pl/t/1/{name}/video.mp4?Expires=1",
             "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
-            "full": f"https://file.inso.pl/t/1/{name}/full.mp4?Expires=1",
         },
     }
 

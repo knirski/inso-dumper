@@ -85,20 +85,43 @@ def test_attachment_ext_from_name() -> None:
     assert att.ext == ".pdf"
 
 
-def test_video_mirrors_photo_shape() -> None:
-    """Video is a flagged working assumption (spike captured videos empty);
-    the shape mirrors the photo item until a real sample confirms it."""
+def test_video_matches_captured_shape() -> None:
+    """Shape verified against a real video-bearing post (Aug 2026):
+    src carries mp4 + thumb, and videos ride inside media.photos[]."""
     video = Video.model_validate(
         {
             "type": "video",
-            "name": "klip.mp4",
+            "name": "VID-20260531-WA0008.mp4",
             "src": {
+                "mp4": "https://file.inso.pl/t/1/video.mp4?Expires=1",
                 "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
-                "full": "https://file.inso.pl/t/1/full.mp4?Expires=1",
             },
         }
     )
     assert video.ext == ".mp4"
+    assert video.url == "https://file.inso.pl/t/1/video.mp4?Expires=1"
+
+
+def test_media_photos_union_discriminates_video() -> None:
+    from inso_dumper.models.timeline import Media
+
+    media = Media.model_validate(
+        {
+            "photos": [
+                _photo_dict(),
+                {
+                    "type": "video",
+                    "name": "klip.mp4",
+                    "src": {
+                        "mp4": "https://file.inso.pl/t/1/video.mp4",
+                        "thumb": "https://file.inso.pl/t/1/thumb.jpg",
+                    },
+                },
+            ]
+        }
+    )
+    assert isinstance(media.photos[0], Photo)
+    assert isinstance(media.photos[1], Video)
 
 
 def test_video_unknown_key_raises() -> None:

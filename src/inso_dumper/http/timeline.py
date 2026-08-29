@@ -27,7 +27,7 @@ from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.client import HttpClient, Response
 from inso_dumper.models.session import Session
-from inso_dumper.models.timeline import Category, MediaItemKind, Post
+from inso_dumper.models.timeline import Category, MediaItemKind, Photo, Post, Video
 
 # Retry policy for ``waitingToProcess > 0`` pages: exponential backoff
 # capped at 30s, 3 retries, then give up (4 fetch attempts total).
@@ -165,21 +165,26 @@ async def download_media(
 ) -> AsyncIterator[CliResult[tuple[MediaItemKind, str, bytes]]]:
     """Fetch each media file's bytes, yielding ``(kind, name, bytes)``.
 
-    Photos come from ``src.full``, videos from ``src.full``, attachments
-    from ``url``. Signed URLs are absolute (host ``file.inso.pl``); the
-    full URL is passed as the request path and the ``Host`` header is
-    set from it. Each file's bytes are read fully into memory before
-    the yield (per-file buffering; no cross-file accumulation, no
-    incremental hashing in v1 — the writer hashes the yielded bytes).
+    Photos and videos both arrive in ``media.photos[]`` (discriminated
+    by ``type``) — photo bytes from ``src.full``, video bytes from
+    ``src.mp4`` — attachments from ``url``. Signed URLs are absolute
+    (host ``file.inso.pl``); the full URL is passed as the request path
+    and the ``Host`` header is set from it. Each file's bytes are read
+    fully into memory before the yield (per-file buffering; no
+    cross-file accumulation, no incremental hashing in v1 — the writer
+    hashes the yielded bytes).
 
     Errors are yielded as ``Err(CliError(HTTP, 'media_download'))`` —
     or the client's Err unchanged — and end the iteration.
     """
-    items: list[tuple[MediaItemKind, str, str]] = [
-        *((MediaItemKind.PHOTO, p.name, str(p.src.full)) for p in post.media.photos),
-        *((MediaItemKind.VIDEO, v.name, str(v.src.full)) for v in post.media.videos),
-        *((MediaItemKind.ATTACHMENT, a.name, str(a.url)) for a in post.media.attachments),
-    ]
+    items: list[tuple[MediaItemKind, str, str]] = []
+    for media in post.media.photos:
+        match media:
+            case Photo():
+                items.append((MediaItemKind.PHOTO, media.name, str(media.src.full)))
+            case Video():
+                items.append((MediaItemKind.VIDEO, media.name, media.url))
+    items.extend((MediaItemKind.ATTACHMENT, a.name, str(a.url)) for a in post.media.attachments)
     for kind, name, url in items:
         headers = {"Host": urlsplit(url).netloc}
         result = await client.request("GET", url, headers=headers)

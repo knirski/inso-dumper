@@ -291,3 +291,32 @@ curl -c jar -b jar -L --data-urlencode '_username=…' \
 `docs/api-notes/har/spike-2026-08-29-login.har` (55 requests) and
 `docs/api-notes/har/spike-2026-08-29.har` (12 requests, mid-session)
 are the artifacts.
+
+## Timeline media: video item shape (live traffic, Aug 2026)
+
+The discovery spike captured `media.videos: []` on every post, so the
+video shape was unknown until the first real sync failed loud
+(`PLATFORM_CHANGED`) on a video-bearing announcement post. Recorded
+page: `docs/api-notes-data/timeline-posts-page3-category2.json`.
+
+Findings:
+
+- **Videos arrive inside `media.photos[]`**, discriminated by
+  `"type": "video"` (photos carry `"type": "photo"`). The dedicated
+  `media.videos` array exists but was empty on every captured post.
+- Video item shape:
+
+  ```json
+  {
+    "type": "video",
+    "name": "VID-20260531-WA0008.mp4",
+    "src": {
+      "mp4":   "https://file.inso.pl/timeline/<institution>/<y>/<m>/<uuid>/video.mp4?Expires=…&Signature=…&Key-Pair-Id=…",
+      "thumb": "https://file.inso.pl/timeline/<institution>/<y>/<m>/<uuid>/thumb.jpg?Expires=…&Signature=…&Key-Pair-Id=…"
+    }
+  }
+  ```
+
+  Unlike photos (`src.thumb` + `src.full`), a video's playable URL is
+  `src.mp4` — there is no `full`.
+- Same short-lived CloudFront signing as photos; download immediately.
