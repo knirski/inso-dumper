@@ -12,39 +12,20 @@ Contract:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import Config
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.auth import build_login_payload, parse_login_response
 from inso_dumper.http.client import HttpClient, Response
+from inso_dumper.http.redirects import (
+    MAX_REDIRECTS,
+    REDIRECT_STATUSES,
+    header_value,
+    is_same_origin,
+)
 from inso_dumper.models.session import Session
-
-# Maximum number of redirects to follow before giving up. The spike's
-# observed chain is /login -> /panel/ -> /panel/home/<uuid>/, i.e. 2;
-# 5 is a 2.5x safety margin that bounds a redirect-storm DoS in
-# seconds, not unbounded.
-_MAX_REDIRECTS = 5
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
-
-
-def _is_same_origin(url: str, base: str) -> bool:
-    """True when ``url`` resolves to the same scheme+host+port as ``base``.
-
-    A naive ``startswith(base)`` accepts ``https://app.inso.pl.attacker.tld``
-    as a prefix of ``https://app.inso.pl``; that sends the Cloudflare-
-    fingerprint headers to a host derived from an attacker-supplied
-    string. urlparse compares the parsed netlocs instead.
-    """
-    base_parsed = urlparse(base)
-    url_parsed = urlparse(url)
-    return (
-        url_parsed.scheme == base_parsed.scheme
-        and (url_parsed.hostname or "").lower() == (base_parsed.hostname or "").lower()
-        and (url_parsed.port or base_parsed.port) == (base_parsed.port or url_parsed.port)
-    )
 
 
 async def login(
@@ -58,7 +39,7 @@ async def login(
     1. GET /login (warm-up; harmless if the server already has cookies).
     2. POST /login with the form payload.
     3. Follow ``Location`` redirects until the URL matches
-       ``/panel/home/<uuid>/`` or the chain exceeds ``_MAX_REDIRECTS``.
+       ``/panel/home/<uuid>/`` or the chain exceeds ``MAX_REDIRECTS``.
        A redirect to a different origin is treated as a server anomaly
        and surfaces as ``Err(HTTP, off_domain_redirect)``.
     4. Parse the final response for PHPSESSID and the user UUID.
@@ -97,21 +78,21 @@ async def login(
     # values so the parser sees the final state.
     last_url = f"{base}/login"
     accumulated_cookies: list[tuple[str, str]] = []
-    for _ in range(_MAX_REDIRECTS):
+    for _ in range(MAX_REDIRECTS):
         # Capture any Set-Cookie headers from the current response.
         for name, value in current.headers:
             if name.lower() == "set-cookie":
                 accumulated_cookies.append((name, value))
-        if current.status not in _REDIRECT_STATUSES:
+        if current.status not in REDIRECT_STATUSES:
             break
-        location = _header_value(current.headers, "location")
+        location = header_value(current.headers, "location")
         if not location:
             break
         # Resolve relative locations against the last URL.
         last_url = urljoin(last_url, location)
         # Off-domain redirect is a server anomaly: return HTTP so the
         # user is told the platform sent us somewhere unexpected.
-        if not _is_same_origin(last_url, base):
+        if not is_same_origin(last_url, base):
             return Err(CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect"))
         # Strip the base prefix; handle the empty case explicitly.
         path = last_url[len(base) :]
@@ -125,12 +106,12 @@ async def login(
                 current = response
     else:
         # The for-else fires only when the loop completed without
-        # breaking — i.e. all _MAX_REDIRECTS iterations ran end to end.
+        # breaking — i.e. all MAX_REDIRECTS iterations ran end to end.
         # At that point `current` is the response fetched on the last
         # allowed redirect. If it is itself a followable redirect, the
         # server is in a loop and we surface HTTP. If it is the final
         # response (e.g. HTTP 200), fall through to the parser.
-        if current.status in _REDIRECT_STATUSES and _header_value(current.headers, "location"):
+        if current.status in REDIRECT_STATUSES and header_value(current.headers, "location"):
             return Err(CliError(kind=CliErrorKind.HTTP, subject="redirect_loop"))
 
     # 4. Build a synthetic final response that includes the accumulated
@@ -143,12 +124,4 @@ async def login(
     return parse_login_response(final_response, final_url=last_url)
 
 
-def _header_value(headers: Sequence[tuple[str, str]], name: str) -> str | None:
-    needle = name.lower()
-    for k, v in headers:
-        if k.lower() == needle:
-            return v
-    return None
-
-
-__all__ = ["_is_same_origin", "login"]
+__all__ = ["is_same_origin", "login"]

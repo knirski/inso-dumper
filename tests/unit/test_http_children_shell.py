@@ -48,13 +48,71 @@ def test_list_children_sends_phpsessid_cookie() -> None:
 
 
 def test_list_children_empty_is_ok() -> None:
-    """An empty menu is a valid user state, not an error."""
-    html = '<el-menu id="menu-0" role="menu"></el-menu>'
+    """A dashboard with only structureless anchors is a valid (empty)
+    user state, not an error."""
+    html = '<a href="https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782"><span>Podsumowanie</span></a>'
     client = FakeHttpClient([(200, html.encode("utf-8"), [])])
     cfg = Config()
     result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
     assert isinstance(result, Ok)
     assert result.value == []
+
+
+def test_list_children_follows_dashboard_redirect() -> None:
+    """The platform 301s the trailing-slash dashboard URL (observed in
+    real traffic); the shell follows it same-origin and parses."""
+    dashboard = DASHBOARD_HTML.encode("utf-8")
+    redirect = (
+        301,
+        b"",
+        [("location", "https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782")],
+    )
+    client = FakeHttpClient([redirect, (200, dashboard, [])])
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Ok)
+    assert len(result.value) == 2
+    assert client.calls[1]["path"] == "/panel/home/eea48660-3740-11ed-a611-06dd2728d782"
+    headers = client.calls[1].get("headers") or {}
+    assert "PHPSESSID=" in headers.get("Cookie", "")
+
+
+def test_list_children_follows_relative_redirect() -> None:
+    dashboard = DASHBOARD_HTML.encode("utf-8")
+    redirect = (302, b"", [("Location", "/panel/home/eea48660-3740-11ed-a611-06dd2728d782")])
+    client = FakeHttpClient([redirect, (200, dashboard, [])])
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Ok)
+    assert client.calls[1]["path"] == "/panel/home/eea48660-3740-11ed-a611-06dd2728d782"
+
+
+def test_list_children_refuses_off_domain_redirect() -> None:
+    redirect = (301, b"", [("location", "https://evil.example/panel/home/x")])
+    client = FakeHttpClient([redirect])
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.HTTP
+    assert result.error.subject == "off_domain_redirect"
+
+
+def test_list_children_surfaces_redirect_loop() -> None:
+    redirect = (301, b"", [("location", "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/")])
+    client = FakeHttpClient([redirect] * 7)
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.HTTP
+    assert result.error.subject == "redirect_loop"
 
 
 def test_list_children_propagates_http_err() -> None:

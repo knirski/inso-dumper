@@ -162,6 +162,42 @@ landing `/panel/home/<user-uuid>/` is the natural target — it is
 always 200, always has the sidebar, and its `<child-uuid>` happens
 to be the last-active child.
 
+### `list_children` derivation — addendum (live traffic, Aug 2026)
+
+First real-session run surfaced two markup/transport changes; the
+parser was updated to match (both re-verified against a captured
+dashboard):
+
+1. **Trailing-slash 301.** `GET /panel/home/<uuid>/` now answers
+   `301 Moved Permanently` → `Location: /panel/home/<uuid>` (no
+   slash), which the post-login landing also uses. `HttpxClient`
+   does not auto-follow redirects (login observes its 302 chain), so
+   `list_children` follows the redirect itself (bounded, same-origin
+   checks in `http/redirects.py`).
+2. **No more `<el-menu id="menu-0">`.** The dashboard renders three
+   `el-menu` popover elements without that id. Child entries are now
+   plain anchors:
+
+   ```html
+   <a href="https://app.inso.pl/panel/home/<child-uuid>" class="…hover:bg-blue-100…">
+     <div class="inline-flex … rounded-full" style="background-color: #FCCC34;">
+       <span class="font-bold … uppercase" style="color: #639302;">IG</span>
+     </div>
+     <div class="ml-1 inline-flex flex-col …">
+       <span>Ignacy</span>
+     </div>
+   </a>
+   ```
+
+   The same entry renders twice (desktop + mobile popovers) and the
+   main nav carries same-URL links without the avatar/name structure
+   (e.g. a lone `Podsumowanie` span). The parser therefore accepts
+   only anchors that have both an avatar `background-color` div and
+   two spans (initials, then first name), deduplicating by
+   `child_id`. Zero matching anchors → `PLATFORM_CHANGED` (markup
+   drift), matching anchors without names → `Ok([])`.
+
+
 ## Other endpoints discovered (out of scope for v1)
 
 These URLs appeared in the sidebar's navigation links and are
