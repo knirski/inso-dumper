@@ -10,7 +10,8 @@ from inso_dumper._result import Err, Ok
 from inso_dumper.config import Config
 from inso_dumper.errors import CliError, CliErrorKind
 from inso_dumper.http.auth import build_login_payload
-from inso_dumper.http.login import _is_same_origin, login
+from inso_dumper.http.login import login
+from inso_dumper.http.redirects import is_same_origin
 from tests.conftest import FakeHttpClient
 
 
@@ -172,10 +173,10 @@ def test_login_off_domain_redirect_returns_http() -> None:
 def test_is_same_origin_uses_urlparse() -> None:
     """A naive startswith would accept app.inso.pl.attacker.tld; urlparse does not."""
     base = "https://app.inso.pl"
-    assert _is_same_origin("https://app.inso.pl/panel/", base) is True
-    assert _is_same_origin("http://app.inso.pl/x", base) is False
-    assert _is_same_origin("https://app.inso.pl.attacker.tld/x", base) is False
-    assert _is_same_origin("https://attacker.tld/x", base) is False
+    assert is_same_origin("https://app.inso.pl/panel/", base) is True
+    assert is_same_origin("http://app.inso.pl/x", base) is False
+    assert is_same_origin("https://app.inso.pl.attacker.tld/x", base) is False
+    assert is_same_origin("https://attacker.tld/x", base) is False
 
 
 def test_login_no_raise_statements() -> None:
