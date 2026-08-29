@@ -134,13 +134,13 @@ def test_one_post_with_photos_dedupes_and_links(tmp_path: Path) -> None:
 
 def test_one_post_with_video_counts_videos(tmp_path: Path) -> None:
     post = _make_post(
-        videos=[
+        photos=[
             {
                 "type": "video",
                 "name": "klip.mp4",
                 "src": {
+                    "mp4": "https://file.inso.pl/t/1/video.mp4",
                     "thumb": "https://file.inso.pl/t/1/thumb.jpg",
-                    "full": "https://file.inso.pl/t/1/full.mp4",
                 },
             }
         ]

@@ -232,16 +232,18 @@ specs may add endpoints (e.g. `PUT /view` is intentionally
   the dumper falls back to writing only `post.html` and logs
   at INFO. (PRD M2 polish: replace with `html-to-markdown` if
   the simple converter proves insufficient.)
-- **Videos:** the spike captured `videos: []` on every post — no
-  video-bearing post was recorded, so the video item shape is
-  **unverified**. The `Video` model mirrors the photo item (the
-  closest captured analog) as a working assumption. A video-bearing
-  post must be captured (spike task in plan.json P1) and the model
-  confirmed before a video-dumping release. `extra="forbid"` makes a
-  mismatched real shape fail loud with `PLATFORM_CHANGED` (exit 6)
-  rather than silently dropping videos. Videos flow through the same
-  download → hash → dedup → symlink path as photos, into
-  `_common/videos/` and `post_target_dir/videos/`.
+- **Videos (verified against live traffic Aug 2026):** the spike only
+  captured `videos: []`; the first real sync hit a video-bearing post
+  and `extra="forbid"` failed loud as designed (`PLATFORM_CHANGED`),
+  which surfaced the true shape: videos ride **inside
+  `media.photos[]`** with `type: "video"` and `src: {mp4, thumb}`
+  (no `full`); the dedicated `media.videos` array stays empty. The
+  model was corrected accordingly (`MediaItem` discriminated union)
+  and the recorded page saved as
+  `docs/api-notes-data/timeline-posts-page3-category2.json`. Videos
+  flow through the same download → hash → dedup → symlink path as
+  photos (bytes from `src.mp4`), into `_common/videos/` and
+  `post_target_dir/videos/`.
 - **Attachments with non-image MIME:** the spike's `attachments[]`
   contains a PDF; the dedup path is content-hash + extension
   derived from `Content-Type` or the URL's path. Unknown types
@@ -513,7 +515,7 @@ with direct `curl` calls.
         "full":  "https://file.inso.pl/.../full.jpg?Expires=...&Signature=...&Key-Pair-Id=..."
       }
     }, ...],
-    "videos": [],                            // captured always-empty; item shape unverified
+    "videos": [],                            // dedicated array observed always-empty; videos ride in photos[]
     "attachments": [{
       "name": "pozegnanie-z-dzieckiem.pdf",
       "url": "https://file.inso.pl/.../pozegnanie-z-dzieckiem.pdf?Expires=...&Signature=...&Key-Pair-Id=..."

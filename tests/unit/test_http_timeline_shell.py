@@ -263,7 +263,7 @@ def test_download_media_attachment_uses_url() -> None:
 
 
 def test_download_media_video_yields_video_kind() -> None:
-    post = _make_post(videos=[_video()])
+    post = _make_post(photos=[_video()])
     client = FakeHttpClient([(200, b"mp4-bytes", [])])
 
     results = asyncio.run(_collect(download_media(client, post)))
