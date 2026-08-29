@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from enum import StrEnum
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -28,7 +27,7 @@ from inso_dumper._result import Err, Ok
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.client import HttpClient, Response
 from inso_dumper.models.session import Session
-from inso_dumper.models.timeline import Category, Post
+from inso_dumper.models.timeline import Category, MediaItemKind, Post
 
 # Retry policy for ``waitingToProcess > 0`` pages: exponential backoff
 # capped at 30s, 3 retries, then give up (4 fetch attempts total).
@@ -158,19 +157,6 @@ async def list_posts(
         for post in page.items:
             yield Ok(post)
         page_number += 1
-
-
-class MediaItemKind(StrEnum):
-    """Closed set distinguishing media kinds at the download boundary.
-
-    The values name the ``_common/`` subtree each kind dedups into;
-    the per-post directory name is derived in ``dump.writer``
-    (attachments live under ``files/`` there, mirroring the platform).
-    """
-
-    PHOTO = "photos"
-    VIDEO = "videos"
-    ATTACHMENT = "attachments"
 
 
 async def download_media(

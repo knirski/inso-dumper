@@ -11,12 +11,12 @@ from inso_dumper.http.children import parse_children_list
 SPIKE_MENU = """
 <el-menu id="menu-0" role="menu">
   <a href="https://app.inso.pl/panel/home/eea48660-3740-11ed-a611-06dd2728d782" id="item-2" role="menuitem">
-    <div style="background-color: #FCCC34;"><span>IG</span></div>
-    <span>Ignacy</span>
+    <div style="background-color: #FCCC34;"><span>FK</span></div>
+    <span>Franek</span>
   </a>
   <a href="https://app.inso.pl/panel/home/a703dc5a-042d-4122-96e8-4c5111e5f7cf" id="item-3" role="menuitem">
-    <div style="background-color: #A9CC63;"><span>LI</span></div>
-    <span>Liliana</span>
+    <div style="background-color: #A9CC63;"><span>Z</span></div>
+    <span>Zofia</span>
   </a>
   <a href="/panel/add-child" id="item-4" role="menuitem">
     <div><i class="fal fa-plus"></i></div>
@@ -31,16 +31,16 @@ def test_parses_two_children_from_spike_markup() -> None:
     assert isinstance(result, Ok)
     children = result.value
     assert len(children) == 2
-    assert children[0].first_name == "Ignacy"
+    assert children[0].first_name == "Franek"
     assert children[0].child_id == "eea48660-3740-11ed-a611-06dd2728d782"
     assert children[0].avatar_color == "#FCCC34"
-    assert children[0].initials == "IG"
-    assert children[0].slug == "ignacy"
-    assert children[1].first_name == "Liliana"
+    assert children[0].initials == "FK"
+    assert children[0].slug == "franek"
+    assert children[1].first_name == "Zofia"
     assert children[1].child_id == "a703dc5a-042d-4122-96e8-4c5111e5f7cf"
     assert children[1].avatar_color == "#A9CC63"
-    assert children[1].initials == "LI"
-    assert children[1].slug == "liliana"
+    assert children[1].initials == "Z"
+    assert children[1].slug == "zofia"
 
 
 def test_add_child_link_is_ignored() -> None:

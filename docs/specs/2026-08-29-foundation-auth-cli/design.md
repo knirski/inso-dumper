@@ -216,7 +216,7 @@ import re
 @dataclass(frozen=True)
 class Child:
     child_id: str          # UUID from /panel/home/<uuid>/ URL
-    first_name: str        # from the sidebar's <span>Ignacy</span>
+    first_name: str        # from the sidebar's <span>Franek</span>
     last_name: str         # discovered lazily; empty until fetched
     group: str | None      # e.g. "Biedronki"; spike did not surface it
     avatar_color: str      # CSS hex, e.g. "#FCCC34"; from sidebar style
@@ -224,7 +224,7 @@ class Child:
 
     @property
     def slug(self) -> str:
-        # Example: "ignacy" (no last name yet) or "ignacy-n" once last
+        # Example: "franek" (no last name yet) or "franek-k" once last
         # name is filled in. Last-name discovery is a follow-up; the
         # foundation accepts the no-last-name slug.
         first = _ascii_fold(self.first_name).lower()
@@ -238,10 +238,10 @@ class Child:
 ```
 
 `last_name` is a known gap. The spike's sidebar markup only carries
-the first name; the page title (`"Podsumowanie - Nirski Ignacy - Inso"`)
+the first name; the page title (`"Podsumowanie - Kowalski Franek - Inso"`)
 has the full name. Lazy discovery (one extra page per child) is
 acceptable; for the foundation `list_children` the slug is just
-`firstname` and the directory will be `children/ignacy/`. The
+`firstname` and the directory will be `children/franek/`. The
 follow-up `announcements-and-dedup` spec should fill `last_name` on
 first sync.
 

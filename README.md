@@ -5,9 +5,11 @@ Authenticates against a parent account and dumps announcements, messages, and
 documents available to that parent, per child, with deduplication into a
 shared area.
 
-This is the **foundation** spec (M1). It ships `inso-dumper login` and
-`inso-dumper children`; content sync, deduplication, indexes, and the
-`verify`/`materialize` sub-commands land in follow-up specs.
+This is the **foundation** spec (M1) plus the **announcements-and-dedup**
+spec (M1 finish + M2). It ships `inso-dumper login`, `inso-dumper
+children`, and `inso-dumper sync` (announcements and galleries with
+photo/video/attachment deduplication); messages, documents, indexes, and
+the `verify`/`materialize` sub-commands land in follow-up specs.
 
 ## Quick start
 
@@ -25,7 +27,38 @@ uv run inso-dumper children
 
 # JSON for scripting
 uv run inso-dumper children --json
+
+# dump announcements + galleries for one child (deduplicated)
+uv run inso-dumper sync <child-slug>
+
+# one category only
+uv run inso-dumper sync <child-slug> --category announcements
 ```
+
+## Sync
+
+`inso-dumper sync <child-slug>` walks the timeline API per category,
+downloads every post's media, and writes the dump under `./dump/`
+(override with `--dump-root PATH`):
+
+```
+dump/
+├── _common/                 # shared media store, deduplicated by content hash
+│   ├── photos/<hash[:2]>/<hash>.<ext>
+│   ├── videos/<hash[:2]>/<hash>.<ext>
+│   └── attachments/<hash[:2]>/<hash>.<ext>
+└── <child-slug>/announcements/
+    ├── .manifest.sqlite     # sync state (idempotent re-runs)
+    └── <YYYY-MM-DD>-<post-slug>/
+        ├── post.json / post.html / post.md
+        ├── photos/1.jpeg    # symlink into _common/
+        ├── videos/…/files/  # only if present
+```
+
+Re-runs skip already-dumped posts (nothing is re-downloaded).
+`--force <post-slug>` (repeatable) re-downloads a named post's media.
+The dumper is read-only against the platform: GET requests only, signed
+media URLs are never persisted, and mark-as-read is never called.
 
 ## Environment variables
 
@@ -50,7 +83,8 @@ request_timeout_seconds = 30.0
 
 `PHPSESSID` and the post-login user UUID are persisted at
 `~/.local/state/inso-dumper/session.json` with mode `0600`. The file is
-re-validated on every `children` run; no refresh path — re-login on expiry.
+re-validated on every `children`/`sync` run; no refresh path — re-login
+on expiry.
 
 ## Exit codes
 

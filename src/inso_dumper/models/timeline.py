@@ -19,7 +19,7 @@ JSON (``post.json`` in the dump) uses the Python field names.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -38,7 +38,7 @@ class Category(IntEnum):
         return int(self)
 
 
-def _ext_from(name: str, url: str) -> str:
+def ext_from(name: str, url: str = "") -> str:
     """Derive a file extension (leading dot included).
 
     Preference order: the original filename's suffix, then the URL
@@ -69,7 +69,7 @@ class Photo(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.src.full))
+        return ext_from(self.name, str(self.src.full))
 
 
 class Video(BaseModel):
@@ -87,7 +87,7 @@ class Video(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.src.full))
+        return ext_from(self.name, str(self.src.full))
 
 
 class Attachment(BaseModel):
@@ -98,7 +98,7 @@ class Attachment(BaseModel):
 
     @property
     def ext(self) -> str:
-        return _ext_from(self.name, str(self.url))
+        return ext_from(self.name, str(self.url))
 
 
 class Media(BaseModel):
@@ -146,4 +146,25 @@ class Post(BaseModel):
     dumped_at: datetime | None = None
 
 
-__all__ = ["Attachment", "Category", "Media", "Photo", "PhotoSource", "Post", "Video"]
+class MediaItemKind(StrEnum):
+    """Closed vocabulary over the three media lists. The values name the
+    ``_common/`` subtree each kind dedups into; the per-post directory
+    name is derived in ``dump.writer`` (attachments live under
+    ``files/`` there, mirroring the platform)."""
+
+    PHOTO = "photos"
+    VIDEO = "videos"
+    ATTACHMENT = "attachments"
+
+
+__all__ = [
+    "Attachment",
+    "Category",
+    "Media",
+    "MediaItemKind",
+    "Photo",
+    "PhotoSource",
+    "Post",
+    "Video",
+    "ext_from",
+]

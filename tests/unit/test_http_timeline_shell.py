@@ -16,7 +16,21 @@ from inso_dumper.http import timeline as timeline_module
 from inso_dumper.http.timeline import download_media, list_posts
 from inso_dumper.models.session import Session
 from inso_dumper.models.timeline import Category, Post
-from tests.conftest import FakeHttpClient
+from tests.conftest import (
+    FakeHttpClient,
+)
+from tests.conftest import (
+    make_attachment_dict as _attachment,
+)
+from tests.conftest import (
+    make_photo_dict as _photo,
+)
+from tests.conftest import (
+    make_post_dict as _post_dict,
+)
+from tests.conftest import (
+    make_video_dict as _video,
+)
 
 SPIKE_DIR = Path("docs/api-notes-data")
 CHILD_UUID = "0123abcd-1111-2222-3333-444455556666"
@@ -29,71 +43,11 @@ def _spike_items(fname: str) -> list[dict[str, Any]]:
     return json.loads(path.read_bytes())["items"]
 
 
-def _post_dict(**overrides: Any) -> dict[str, Any]:
-    """A minimal but complete API-shaped post payload (camelCase keys)."""
-    base: dict[str, Any] = {
-        "id": "3d5b38b4-6c0b-4e79-8e55-375272c76779",
-        "title": "Wycieczka",
-        "content": "<p>hello</p>",
-        "media": {"photos": [], "videos": [], "attachments": []},
-        "createdAt": 1787811431,
-        "createdAtText": "czwartek,  8:17",
-        "visibleFor": ["Zółta"],
-        "visibleForChildren": [],
-        "actions": {"vote": "/v", "unvote": "/u"},
-        "sticky": False,
-        "archived": False,
-        "userVoted": False,
-        "author": "Bania Agnieszka",
-        "likes": 0,
-        "likesText": "0 polubień",
-        "commentsAvailable": False,
-        "comments": 0,
-        "commentsText": "0 komentarzy",
-        "isWorker": False,
-        "isWorkerOnly": False,
-        "displayed": True,
-        "poll": None,
-        "translations": [],
-    }
-    base.update(overrides)
-    return base
-
-
 def _page(
     items: list[dict[str, Any]], waiting: int = 0
 ) -> tuple[int, bytes, list[tuple[str, str]]]:
     body = json.dumps({"items": items, "waitingToProcess": waiting}).encode("utf-8")
     return (200, body, [])
-
-
-def _photo(name: str = "IMG_1.jpeg") -> dict[str, Any]:
-    return {
-        "type": "photo",
-        "name": name,
-        "src": {
-            "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
-            "full": f"https://file.inso.pl/t/1/{name}/full.jpg?Expires=1",
-        },
-    }
-
-
-def _video(name: str = "klip.mp4") -> dict[str, Any]:
-    return {
-        "type": "video",
-        "name": name,
-        "src": {
-            "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
-            "full": f"https://file.inso.pl/t/1/{name}/full.mp4?Expires=1",
-        },
-    }
-
-
-def _attachment(name: str = "dokument.pdf") -> dict[str, Any]:
-    return {
-        "name": name,
-        "url": f"https://file.inso.pl/t/1/{name}?Expires=1",
-    }
 
 
 def _make_post(**media: Any) -> Post:
@@ -103,7 +57,8 @@ def _make_post(**media: Any) -> Post:
 
 
 async def _collect(
-    aiter: AsyncIterator[Ok[Post] | Err[CliError]] | AsyncIterator[Ok[tuple[Any, str, bytes]] | Err[CliError]],
+    aiter: AsyncIterator[Ok[Post] | Err[CliError]]
+    | AsyncIterator[Ok[tuple[Any, str, bytes]] | Err[CliError]],
 ) -> list[Ok[Post] | Err[CliError] | Ok[tuple[Any, str, bytes]]]:
     out: list[Ok[Post] | Err[CliError] | Ok[tuple[Any, str, bytes]]] = []
     async for item in aiter:

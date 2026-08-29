@@ -17,3 +17,7 @@ __pycache__/
 
 # Command Code session state (local-only; never commit)
 .commandcode/
+
+# Dump output: contains children's personal data (photos, videos,
+# attachments, post text). Never commit.
+dump/

@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
 from logging import Logger
 from pathlib import Path
 from typing import Any, NoReturn, assert_never
@@ -30,8 +31,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from inso_dumper._result import Err
+from inso_dumper._result import Err, Ok
 from inso_dumper.config import load_config
+from inso_dumper.dump.sync import SyncSummary
+from inso_dumper.dump.sync import run as sync_run
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
 from inso_dumper.http.client import HttpxClient
@@ -42,6 +45,7 @@ from inso_dumper.logging_setup import (
     is_verbose,
     setup_logging,
 )
+from inso_dumper.models.timeline import Category
 from inso_dumper.paths import session_file
 from inso_dumper.session.store import save_session
 
@@ -214,3 +218,137 @@ def _child_to_dict(c: Any) -> dict[str, Any]:
     dataclass automatically.
     """
     return {**dataclasses.asdict(c), "slug": c.slug, "display_name": c.display_name}
+
+
+class SyncCategory(StrEnum):
+    """The ``--category`` choice set for ``sync``."""
+
+    ANNOUNCEMENTS = "announcements"
+    GALLERIES = "galleries"
+    BOTH = "both"
+
+
+def _categories_for(choice: SyncCategory) -> list[Category]:
+    match choice:
+        case SyncCategory.ANNOUNCEMENTS:
+            return [Category.ANNOUNCEMENTS]
+        case SyncCategory.GALLERIES:
+            return [Category.GALLERIES]
+        case SyncCategory.BOTH:
+            return [Category.ANNOUNCEMENTS, Category.GALLERIES]
+        case _ as unreachable:
+            return assert_never(unreachable)
+
+
+def _ensure_dump_root(root: Path) -> CliResult[Path]:
+    """Create the dump root (0o700, re-tightened if it pre-exists); a bad
+    path is a user/config error."""
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(root, 0o700)
+    except OSError:
+        return Err(CliError(kind=CliErrorKind.CONFIG, subject="dump_root"))
+    return Ok(root)
+
+
+@app.command()
+def sync(
+    child_slug: str = typer.Argument(..., help="Child slug as shown by `inso-dumper children`."),
+    category: SyncCategory = typer.Option(
+        SyncCategory.BOTH,
+        "--category",
+        help="Which categories to sync: announcements, galleries, or both.",
+    ),
+    dump_root: Path = typer.Option(
+        Path("dump"), "--dump-root", help="Dump output directory (created if missing)."
+    ),
+    force: list[str] = typer.Option(
+        None,
+        "--force",
+        help="Post slug to re-download even if already dumped; repeatable.",
+    ),
+    config_path: Path | None = typer.Option(
+        None, "--config", help="Alternate TOML config file path."
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """Dump announcements and galleries for one child, deduplicated."""
+    setup_logging(verbose=verbose or is_verbose())
+    log = get_logger("cli")
+
+    session_result = ensure_session_loaded(session_file())
+    if isinstance(session_result, Err):
+        if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
+            _console_err.print(
+                "No usable saved session. Run `inso-dumper login` first.",
+                style="yellow",
+            )
+        _die(session_result.error, log)
+    session = session_result.value
+
+    root = dump_root.expanduser().resolve()
+    root_result = _ensure_dump_root(root)
+    if isinstance(root_result, Err):
+        _die(root_result.error, log)
+
+    available: list[str] = []
+
+    async def _do_sync() -> CliResult[Any]:
+        cfg_result = load_config(config_path)
+        if isinstance(cfg_result, Err):
+            return cfg_result
+        cfg = cfg_result.value
+        totals = SyncSummary(0, 0, 0, 0, 0, 0.0)
+        async with HttpxClient(cfg) as client:
+            kids_result = await list_children_shell(client, cfg, session)
+            child: Any = None
+            match kids_result:
+                case Err(error):
+                    return Err(error)
+                case Ok(kids):
+                    available.extend(k.slug for k in kids)
+                    child = next((k for k in kids if k.slug == child_slug), None)
+            if child is None:
+                return Err(
+                    CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug")
+                )
+            for cat in _categories_for(category):
+                run_result = await sync_run(
+                    client=client,
+                    session=session,
+                    child=child,
+                    category=cat,
+                    dump_root=root,
+                    force=set(force) if force else set(),
+                    log=log,
+                )
+                match run_result:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(s):
+                        totals = SyncSummary(
+                            totals.posts_new + s.posts_new,
+                            totals.posts_skipped + s.posts_skipped,
+                            totals.photos + s.photos,
+                            totals.videos + s.videos,
+                            totals.attachments + s.attachments,
+                            totals.seconds + s.seconds,
+                        )
+        return Ok(totals)
+
+    result = _dispatch(_do_sync, log)
+    if isinstance(result, Err):
+        if result.error.subject == "unknown_child_slug" and available:
+            _console_err.print(f"Available slugs: {', '.join(available)}", style="yellow")
+        _die(result.error, log)
+    summary = result.value
+
+    log.info(
+        "sync done child=%s new=%d skipped=%d", child_slug, summary.posts_new, summary.posts_skipped
+    )
+    _console_out.print(
+        f"Synced {summary.posts_new} posts ({summary.posts_skipped} skipped, "
+        f"{summary.photos} photos, {summary.videos} videos, "
+        f"{summary.attachments} attachments) for {child_slug} in {summary.seconds:.1f}s."
+    )
+    raise typer.Exit(0)
