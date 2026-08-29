@@ -73,8 +73,18 @@ async def login(
         case Ok(_):
             pass
 
-    # 2. POST /login with the form payload.
-    post = await client.request("POST", "/login", form=build_login_payload(email, password))
+    # 2. POST /login with the form payload. The Inso platform requires
+    # Origin and Referer to match the configured base URL (verified in
+    # docs/api-notes.md "Auth model"); httpx with the browser-like
+    # header set alone is rejected.
+    origin = base
+    referer = f"{base}/login"
+    post = await client.request(
+        "POST",
+        "/login",
+        form=build_login_payload(email, password),
+        headers={"Origin": origin, "Referer": referer},
+    )
     match post:
         case Err(error):
             return Err(error)

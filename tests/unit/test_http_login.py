@@ -46,6 +46,35 @@ def test_login_follows_redirect_chain_and_emits_session() -> None:
     assert client.calls[3]["path"] == "/panel/home/eea48660-3740-11ed-a611-06dd2728d782/"
 
 
+def test_login_post_sends_origin_and_referer() -> None:
+    """The Inso platform requires Origin and Referer on the login POST.
+
+    Verified against the spike (docs/api-notes.md "Auth model"):
+    'Required headers: Origin, Referer, Upgrade-Insecure-Requests, normal UA'.
+    httpx with the browser-like header set alone is rejected by the
+    auth endpoint.
+    """
+    cookie = "PHPSESSID=d9f828d2629433b8d1b9690a17d477e3; path=/; HttpOnly"
+    client = FakeHttpClient(
+        [
+            _ok(200, b"<html>login form</html>"),
+            _ok(302, b"", [("Location", "/panel/"), ("Set-Cookie", cookie)]),
+            _ok(200, b"<html>dashboard</html>"),
+        ]
+    )
+    cfg = Config()
+
+    async def run() -> Any:
+        return await login(client, cfg, "user@example.com", "hunter2")  # type: ignore[arg-type]
+
+    asyncio.run(run())
+
+    post_call = client.calls[1]
+    assert post_call["method"] == "POST"
+    assert post_call["headers"]["Origin"] == "https://app.inso.pl"
+    assert post_call["headers"]["Referer"] == "https://app.inso.pl/login"
+
+
 def test_login_short_circuits_on_http_err() -> None:
     err = CliError(kind=CliErrorKind.HTTP, subject="connect")
     cfg = Config()
