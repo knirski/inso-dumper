@@ -173,7 +173,7 @@ def children(
     if isinstance(session_result, Err):
         if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
             _console_err.print(
-                "No saved session. Run `inso-dumper login` first.",
+                "No usable saved session. Run `inso-dumper login` first.",
                 style="yellow",
             )
         _die(session_result.error, log)
