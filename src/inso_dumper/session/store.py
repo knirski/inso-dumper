@@ -49,7 +49,18 @@ def save_session(path: Path, session: Session) -> CliResult[None]:
         )
         try:
             data = session.model_dump_json().encode("utf-8")
-            os.write(fd, data)
+            # Loop until the entire payload is on disk. ``os.write`` on
+            # blocking file descriptors is allowed to return fewer
+            # bytes than requested without raising (e.g. when the write
+            # is interrupted by a signal); the previous code accepted
+            # the short write and then ``os.replace`` swapped the
+            # valid prior session for the truncated JSON.
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written == 0:
+                    raise OSError("short write to session file")
+                view = view[written:]
             # fsync the data so a power-cut between os.write and
             # os.replace doesn't leave the real file pointing at zero
             # bytes (forcing an unnecessary re-login).

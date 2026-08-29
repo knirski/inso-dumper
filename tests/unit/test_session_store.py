@@ -140,3 +140,43 @@ def test_save_session_keeps_real_file_intact_on_replace_failure(
     # The original file is still there from the first save (os.replace
     # was never called for the second save).
     assert path.exists()
+
+
+def test_save_session_loops_on_short_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.write may return fewer bytes than requested; the loop continues."""
+    path = tmp_path / "session.json"
+    real_write = os.write
+    call_count = {"n": 0}
+
+    def first_call_short(
+        fd: int, data: bytes | memoryview, *args: object, **kwargs: object
+    ) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return real_write(fd, bytes(data[: len(data) // 2]))
+        return real_write(fd, bytes(data))
+
+    monkeypatch.setattr("os.write", first_call_short)
+    save_session(path, make_session())
+    assert call_count["n"] >= 2
+    result = maybe_load_session(path)
+    assert isinstance(result, Ok)
+    assert result.value is not None
+
+
+def test_save_session_aborts_on_zero_byte_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0-byte return from os.write raises OSError; the save fails clean."""
+    path = tmp_path / "session.json"
+
+    def zero_write(fd: int, data: bytes | memoryview, *args: object, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr("os.write", zero_write)
+    result = save_session(path, make_session())
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.CONFIG
+    assert not path.exists()
