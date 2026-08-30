@@ -1,0 +1,332 @@
+{
+  "feature": "settlements-dump",
+  "spec": "docs/specs/2026-08-30-settlements/design.md",
+  "goal": "Add a per-child settlements category to sync that scrapes the server-rendered Rozliczenia history page into per-month settlement.json plus invoice PDFs, with schema-v4 manifest skip state",
+  "preserved_behavior": [
+    "Announcements/galleries/messages flows and their v3 manifests are untouched",
+    "Documents gate still loud-skips (documents_unverified)",
+    "Read-only GET-only guarantee, including never touching the payment flow",
+    "--force stays category-scoped",
+    "Error taxonomy and CLI exit codes unchanged"
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Parse and fetch settlements",
+      "tasks": [
+        {
+          "id": "T1",
+          "name": "Settlement models and pure normalization helpers",
+          "depends_on": [],
+          "inputs": [
+            "design.md domain model section (SettlementStatus, SettlementItem, SettlementMonth, SettlementHistoryPage)",
+            "Captured card text: 'Termin 11 sierpnia 2026', '1 424,00 zł' (money format with thousands space, comma decimal)",
+            "AGENTS.md style: frozen pydantic models, extra=forbid, StrEnum for closed sets, Result-typed helpers"
+          ],
+          "description": "Create models/settlements.py with SettlementStatus StrEnum (PAID, UNKNOWN), SettlementItem (label, amount_pln Decimal|None, count int|None, is_summary bool — summary rows are Suma/Do zapłaty/Zapłacono/Aktualne saldo; Czesne is an ordinary charge), SettlementMonth (month YYYY-MM, amount_pln, saldo_pln, due_date date|None, status, items, invoice_bill_uuid str|None), SettlementHistoryPage (months list). Result-typed pure helpers _parse_money (strip spaces/NBSP, comma decimal, optional leading '-') and _parse_due_date (Polish month-name map). Drift errors: Err(PLATFORM_CHANGED, 'settlements_money') and Err(PLATFORM_CHANGED, 'settlements_month_name').",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/_result.py (Ok/Err)",
+              "src/inso_dumper/errors.py (CliError, CliErrorKind)"
+            ],
+            "create": [
+              "src/inso_dumper/models/settlements.py",
+              "tests/unit/test_models_settlements.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "SettlementMonth / SettlementItem / SettlementHistoryPage",
+              "requirement": "Represent one parsed history card (US-1) as typed, validated data",
+              "consumers": ["parse_settlements_history (T2)", "write_settlement_month (T5)", "run_settlements (T6)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "parses '1 424,00 zł' to Decimal 1424.00",
+              "parses negative '-50,50 zł'",
+              "parses NBSP-thousands money",
+              "rejects garbage money with settlements_money drift",
+              "normalizes all 12 Polish month names to YYYY-MM",
+              "rejects unknown month name with settlements_month_name drift",
+              "models reject unknown fields (extra=forbid)"
+            ],
+            "acceptance": [
+              "All model tests pass via uv run pytest",
+              "Helpers are pure (no IO, no try/except for control flow)",
+              "basedpyright and ruff clean"
+            ]
+          }
+        },
+        {
+          "id": "T2",
+          "name": "History-page parser",
+          "depends_on": ["T1"],
+          "inputs": [
+            "T1 models",
+            "Captured markup docs/api-notes-data/billing-history-page.html (434 KB, 47 month cards, real structure)",
+            "Children-scraper precedent: HTMLParser subclass in src/inso_dumper/http/children.py"
+          ],
+          "description": "Implement parse_settlements_history(html: str) -> CliResult[SettlementHistoryPage] in http/settlements.py using a stdlib HTMLParser subclass. Match month cards structurally per the capture (Tailwind div cards; no stable ids assumed). Map charges-table rows to SettlementItem with summary-row classification; extract 'Pobierz fakturę' href bill uuid. Drift: Err(PLATFORM_CHANGED, 'settlements_month_card') for a card missing Kwota/Saldo/Termin or unparseable structure, 'settlements_duplicate_month' for two cards resolving to the same YYYY-MM. Pure function — no IO. Corpus-backed tests skip when the capture file is absent (established pattern); also commit small synthetic HTML fixtures.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/children.py (HTMLParser subclass pattern)",
+              "docs/api-notes-data/billing-history-page.html (capture, gitignored, skip-if-absent)"
+            ],
+            "create": [
+              "tests/unit/fixtures/settlements-history-small.html"
+            ],
+            "modify": [
+              "src/inso_dumper/http/settlements.py",
+              "tests/unit/test_http_settlements.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "parse_settlements_history",
+              "requirement": "Turn the server-rendered history page into typed months (US-1) with fail-loud drift (US-5)",
+              "consumers": ["fetch_settlements_history shell (T3)", "run_settlements (T6)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "full capture parses to 47 months",
+              "2026-08 card: amount 1424.00, saldo 0.00, due 2026-08-11, status paid, invoice bill uuid extracted",
+              "itemized rows map with counts (Śniadanie count=16) and summary classification",
+              "truncated/missing card structure drifts with settlements_month_card",
+              "duplicate month key drifts with settlements_duplicate_month",
+              "corpus-backed tests skip when docs/api-notes-data/ is absent"
+            ],
+            "acceptance": [
+              "Parser is pure (no IO, no httpx)",
+              "All parser tests pass with and without the capture corpus present"
+            ]
+          }
+        },
+        {
+          "id": "T3",
+          "name": "Fetch shells (history page + invoice)",
+          "depends_on": ["T1", "T2"],
+          "inputs": [
+            "T1 and T2",
+            "Shell pattern in src/inso_dumper/http/messages.py and its FakeHttpClientScript test harness",
+            "Redirect-to-login handling in src/inso_dumper/http/session_expiry.py (SESSION_EXPIRED precedent)"
+          ],
+          "description": "Add fetch_settlements_history(client, session, child_uuid) as an async generator yielding CliResult[SettlementHistoryPage]: one GET of /panel/child/<child-uuid>/settlement; non-200 → Err(HTTP, 'settlements_status_<n>'); redirect-to-login → Err(SESSION_EXPIRED) via the session_expiry helpers. Add fetch_invoice(client, session, bill_uuid) -> CliResult[bytes]: GET /panel/settlement/<bill-uuid>/invoice; non-200 → Err(HTTP, 'invoice_status_<n>'); content-type not application/pdf → Err(PLATFORM_CHANGED, 'invoice_content_type'). GET-only.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/session_expiry.py",
+              "src/inso_dumper/http/client.py (HttpClient protocol)",
+              "tests/unit/test_http_messages.py (FakeHttpClientScript pattern)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/http/settlements.py",
+              "tests/unit/test_http_settlements.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "fetch_settlements_history / fetch_invoice",
+              "requirement": "Socket boundary for the two verified GETs (US-1, US-6)",
+              "consumers": ["run_settlements (T6)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "200 response parses and yields Ok(page)",
+              "404 yields Err(HTTP, 'settlements_status_404')",
+              "redirect-to-login yields Err(SESSION_EXPIRED)",
+              "non-PDF invoice body yields Err(PLATFORM_CHANGED, 'invoice_content_type')",
+              "invoice 404 yields Err(HTTP, 'invoice_status_404')",
+              "no non-GET request is ever issued"
+            ],
+            "acceptance": [
+              "Shells never raise httpx errors past the boundary",
+              "All shell tests pass; ruff and basedpyright clean"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "Persist months and invoices",
+      "tasks": [
+        {
+          "id": "T4",
+          "name": "SettlementManifest (schema v4)",
+          "depends_on": [],
+          "inputs": [
+            "src/inso_dumper/dump/manifest.py: Manifest class (_SCHEMA_VERSION=3, gate {0,3}), open_manifest, conversations trio (recorded_conversation/upsert_conversation/force_clear_conversation) and swallow-and-warn read semantics",
+            "design.md Manifest v4 section (settlements table DDL, strict gate, per-child manifest path)"
+          ],
+          "description": "Add a SettlementManifest class to dump/manifest.py with its own _SCHEMA_VERSION = 4 — the existing Manifest stays v3 and untouched. open_settlements_manifest(path) -> CliResult[SettlementManifest] gates user_version ∉ {0, 4} to Err(CONFIG, 'manifest_schema') with the documented recovery (delete the file). Create the settlements table per design DDL (month_key TEXT PRIMARY KEY, bill_uuid TEXT, invoice_downloaded_at TEXT, first_seen_at TEXT NOT NULL). Implement recorded_settlement, upsert_settlement (preserves first_seen_at), force_clear_settlements, mirroring the conversations trio including swallow-and-warn reads. 0600 file, 0700 parent dir as the existing class does.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/dump/manifest.py (Manifest class structure, error handling, swallow-and-warn pattern)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/dump/manifest.py",
+              "tests/unit/test_dump_manifest.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "SettlementManifest",
+              "requirement": "Per-child settlements skip state at schema v4 (US-3, US-4)",
+              "consumers": ["run_settlements (T6)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "fresh file is created at user_version=4 with the settlements table",
+              "a v3 user_version file is rejected loud with Err(CONFIG, 'manifest_schema') and a recovery warning",
+              "upsert preserves first_seen_at on re-record",
+              "force_clear_settlements empties the table",
+              "corrupt/locked read warns and degrades instead of raising",
+              "existing v3 Manifest tests still pass unchanged"
+            ],
+            "acceptance": [
+              "v3 gate {0,3} behavior unchanged (test-asserted)",
+              "All manifest tests pass; ruff and basedpyright clean"
+            ]
+          }
+        },
+        {
+          "id": "T5",
+          "name": "Month writer",
+          "depends_on": ["T1"],
+          "inputs": [
+            "src/inso_dumper/dump/writer.py: _write_bytes (atomic 0600), ensure_private_dir (0700, parents)",
+            "design.md JSON shape example (Decimal serialized as strings, ISO date)"
+          ],
+          "description": "Create dump/settlements.py with write_settlement_month(month, dir_path) -> CliResult[Path] (ensure_private_dir, atomic settlement.json, Decimal fields serialized as strings, due_date ISO or absent) and write_invoice(data: bytes, dir_path) -> CliResult[Path] (atomic invoice.pdf). No skip/presence logic here — the orchestrator owns it.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/dump/writer.py (_write_bytes, ensure_private_dir)"
+            ],
+            "create": [
+              "src/inso_dumper/dump/settlements.py",
+              "tests/unit/test_dump_settlements.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "month writer (write_settlement_month / write_invoice)",
+              "requirement": "The dump contract for one month directory (US-1)",
+              "consumers": ["run_settlements (T6)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "settlement.json matches the design example shape (string Decimals, ISO date, omitted null invoice ref)",
+              "file mode 0600, directory mode 0700",
+              "overwrite is atomic and idempotent (second write byte-identical)",
+              "OSError surfaces as the writer error variant, not a raw exception"
+            ],
+            "acceptance": [
+              "Writer performs no network IO",
+              "All writer tests pass; ruff and basedpyright clean"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "Orchestrate and expose",
+      "tasks": [
+        {
+          "id": "T6",
+          "name": "run_settlements orchestrator",
+          "depends_on": ["T3", "T4", "T5"],
+          "inputs": [
+            "T3, T4, T5",
+            "run_messages precedent in dump/sync.py (manifest+file skip rule, exception boundary, SyncSummary keyword construction)",
+            "design.md orchestrator section"
+          ],
+          "description": "Add run_settlements(client, session, child, dump_root, force_months) -> CliResult[SyncSummary] to dump/sync.py: open dump/<child-slug>/settlements/.manifest.sqlite, fetch history, and per month resolve the <YYYY-MM> dir, write settlement.json, upsert the manifest, and download the invoice iff the manifest row lacks invoice_downloaded_at or the file is absent or the month is forced. Catch httpx.HTTPError/OSError at the boundary → Err(HTTP)/Err(IO, 'settlements_write'); never re-raise. Add SyncSummary.settlements field (keyword construction with defaults).",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/dump/sync.py (run_messages orchestration and boundary patterns)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/dump/sync.py",
+              "tests/unit/test_dump_sync.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "run_settlements",
+              "requirement": "The per-child settlements category entry combining fetch, write, and skip state (US-1, US-3, US-4, US-5)",
+              "consumers": ["cli _do_sync (T7)"]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "happy path writes JSONs + invoices and reports counts",
+              "second run skips invoice downloads (history GET only, 0 invoice GETs) and reports skipped",
+              "manifest row without file on disk re-downloads",
+              "force re-downloads only the forced months into the same directories",
+              "parser drift propagates fail-loud (no partial dump)",
+              "existing v3 manifest files are never opened or modified"
+            ],
+            "acceptance": [
+              "Orchestrator converts all boundary exceptions to Result errors",
+              "All sync tests pass; ruff and basedpyright clean"
+            ]
+          }
+        },
+        {
+          "id": "T7",
+          "name": "CLI wiring",
+          "depends_on": ["T6"],
+          "inputs": [
+            "T6",
+            "src/inso_dumper/cli.py: SyncCategory, _CategoryPlan/_plan_for, _SyncTotals, _summary_line, --force help",
+            "Integration-test helpers in tests/integration/test_cli.py"
+          ],
+          "description": "Add SyncCategory.SETTLEMENTS to the enum and help text; default all includes it; both stays rejected. _plan_for returns a per-child plan so run_settlements executes inside the child loop (unlike messages/documents which run once per invocation). _SyncTotals/_summary_line gain the settlements segment 'N settlements (M skipped, K invoices)', rendered only when the category ran. --force help documents YYYY-MM keys for settlements. Documents gate untouched.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/cli.py (category plumbing, summary assembly)",
+              "tests/integration/test_cli.py (fake-client fixtures)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/cli.py",
+              "tests/integration/test_cli.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "sync --category settlements dumps from a scripted fake session",
+              "default all runs settlements for each child",
+              "summary line contains the settlements segment only when it ran",
+              "--force 2026-08 passes through to run_settlements",
+              "--category both still exits 2",
+              "documents gate still loud-skips in default all"
+            ],
+            "acceptance": [
+              "uv run inso-dumper sync --help shows the new category",
+              "Full pytest suite, ruff check, ruff format --check, and basedpyright all green"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
