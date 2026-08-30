@@ -16,11 +16,14 @@ The API uses camelCase keys; the models use snake_case with
 ``populate_by_name`` so both spellings validate. Serialisation back to
 JSON (``conversation.json`` in the dump) uses the Python field names.
 
-Capture-proven quirk: ``attachments`` is polymorphic — a bare empty
-list when a message has none, the ``{media, other}`` dict when it
-does. :class:`Message` normalizes ``[]`` to an empty
-:class:`MessageAttachments`; a *non-empty* list is drift and fails
-validation.
+Capture-proven quirk (updated Aug 2026 against a 128-message real
+conversation): ``attachments`` is polymorphic — the ``{media, other}``
+dict on newer messages, a bare list (empty *or* non-empty) on legacy
+ones; one historical attachment carries ``url: {thumb, mp4}`` (video,
+no ``full``); and a legacy "participant removed" system event has an
+empty ``message`` with the person's name in ``isRemoved`` (str).
+:class:`Message` normalizes both list shapes to
+:class:`MessageAttachments`; unknown keys still fail loud.
 """
 
 from __future__ import annotations
@@ -28,13 +31,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl, model_validator
 
 
-def _empty_list_is_no_attachments(value: object) -> object:
-    """Map the captured ``attachments: []`` to the empty dict shape."""
-    if isinstance(value, list) and not value:
-        return {}
+def _normalize_attachments(value: object) -> object:
+    """Map either captured ``attachments`` shape to the dict form.
+
+    The bare-list shape (empty on newer no-attachment messages, non-
+    empty on legacy ones) becomes ``{"media": [...]}``; the dict shape
+    passes through unchanged.
+    """
+    if isinstance(value, list):
+        return {"media": value}
     return value
 
 
@@ -91,10 +99,30 @@ class MessageSender(BaseModel):
 
 
 class MessageAttachmentUrls(BaseModel):
+    """Attachment URLs. Images carry ``full``; videos carry ``mp4``
+    (real-traffic evidence: ``{thumb, mp4}`` with no ``full``). At
+    least one of the two must be present; ``best`` is the download
+    URL."""
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     thumb: HttpUrl
-    full: HttpUrl
+    full: HttpUrl | None = None
+    mp4: HttpUrl | None = None
+
+    @model_validator(mode="after")
+    def _require_download_url(self) -> MessageAttachmentUrls:
+        if self.full is None and self.mp4 is None:
+            raise ValueError("attachment url needs 'full' or 'mp4'")
+        return self
+
+    @property
+    def best(self) -> str:
+        """The download URL: ``full`` when present, else ``mp4``."""
+        if self.full is not None:
+            return str(self.full)
+        assert self.mp4 is not None  # guaranteed by the validator
+        return str(self.mp4)
 
 
 class MessageAttachment(BaseModel):
@@ -125,11 +153,12 @@ class Message(BaseModel):
     send_timestamp: int = Field(alias="sendTimestamp")  # unix seconds
     sender: MessageSender
     incoming: bool
-    attachments: Annotated[
-        MessageAttachments, BeforeValidator(_empty_list_is_no_attachments)
-    ]
+    attachments: Annotated[MessageAttachments, BeforeValidator(_normalize_attachments)]
     main: bool
-    is_removed: bool = Field(alias="isRemoved")
+    # bool on normal messages; on legacy "participant removed" system
+    # events the server stores the person's name here (str) with an
+    # empty ``message``. Dumped verbatim either way.
+    is_removed: bool | str = Field(alias="isRemoved")
     can_remove: bool = Field(alias="canRemove")
 
 
