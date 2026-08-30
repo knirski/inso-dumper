@@ -244,7 +244,7 @@ async def _link_new_attachments(
     linked = 0
     for message in new_messages:
         for n, attachment in enumerate(message.attachments.media, start=1):
-            fetched = await _fetch_attachment(client, str(attachment.url.full))
+            fetched = await _fetch_attachment(client, attachment.url.best)
             match fetched:
                 case Err(error):
                     return Err(error)
@@ -256,7 +256,7 @@ async def _link_new_attachments(
                 message_id=message.id,
                 n=n,
                 name=attachment.name,
-                url=str(attachment.url.full),
+                url=attachment.url.best,
                 data=data,
                 is_video=attachment.is_video,
                 log=log,

@@ -13,6 +13,7 @@ from inso_dumper.models.messages import (
     Conversation,
     ConversationListPage,
     Message,
+    MessageAttachmentUrls,
     MessageAttachments,
 )
 
@@ -132,17 +133,70 @@ def test_message_unknown_key_raises() -> None:
 def test_message_attachments_empty_list_normalizes_to_no_attachments() -> None:
     """Captured evidence: 29 of 30 detail messages carry ``attachments:
     []`` (bare empty list), one carries the {media, other} dict. The
-    empty list means no attachments and must normalize — a *non-empty*
-    list stays a validation error (never observed → drift)."""
+    empty list means no attachments and must normalize."""
     msg = Message.model_validate(_message_dict())
     assert msg.attachments.media == []
     assert msg.attachments.other == []
 
 
-def test_message_attachments_nonempty_list_is_drift() -> None:
-    bad = _message_dict() | {"attachments": [{"surprise": True}]}
+def test_message_attachments_nonempty_bare_list_is_legacy_shape() -> None:
+    """Real-traffic evidence (Aug 2026, 128-message conversation): 119
+    of 128 historical messages carry ``attachments`` as a bare list of
+    attachment objects — the {media, other} envelope only appears on
+    newer messages. A bare list must normalize to the envelope."""
+    legacy = _message_dict() | {
+        "attachments": [
+            {
+                "name": "zdjecie.jpeg",
+                "url": {
+                    "thumb": "https://file.inso.pl/t/1/thumb.jpg",
+                    "full": "https://file.inso.pl/t/1/full.jpeg",
+                },
+                "isVideo": False,
+            }
+        ]
+    }
+    msg = Message.model_validate(legacy)
+    assert len(msg.attachments.media) == 1
+    assert msg.attachments.media[0].name == "zdjecie.jpeg"
+    assert msg.attachments.other == []
+
+
+def test_message_attachment_video_url_has_mp4_not_full() -> None:
+    """Real-traffic evidence: one attachment in the 128-message walk
+    carries ``url: {thumb, mp4}`` (video) with no ``full`` key."""
+    urls = MessageAttachmentUrls.model_validate(
+        {"thumb": "https://file.inso.pl/t/1/thumb.jpg", "mp4": "https://file.inso.pl/t/1/video.mp4"}
+    )
+    assert urls.best == "https://file.inso.pl/t/1/video.mp4"
+    # Image attachments keep using ``full``.
+    image = MessageAttachmentUrls.model_validate(
+        {
+            "thumb": "https://file.inso.pl/t/1/thumb.jpg",
+            "full": "https://file.inso.pl/t/1/full.jpeg",
+        }
+    )
+    assert image.best == "https://file.inso.pl/t/1/full.jpeg"
+
+
+def test_message_attachment_urls_without_either_is_drift() -> None:
     with pytest.raises(ValidationError):
-        Message.model_validate(bad)
+        MessageAttachmentUrls.model_validate({"thumb": "https://file.inso.pl/t/1/thumb.jpg"})
+
+
+def test_message_is_removed_legacy_event_carries_name() -> None:
+    """Real-traffic evidence: a legacy "participant removed" system
+    event has an empty ``message`` and the person's name in
+    ``isRemoved`` (str). The field is bool | str, dumped verbatim."""
+    event = _message_dict() | {
+        "message": "",
+        "isRemoved": "Beata Nirska",
+        "sender": {"type": "guardian", "name": "Beata Nirska", "initials": "BN", "avatar": None},
+    }
+    msg = Message.model_validate(event)
+    assert msg.is_removed == "Beata Nirska"
+    # Regular messages keep the boolean flag.
+    assert Message.model_validate(_message_dict()).is_removed is False
 
 
 def test_message_attachments_dict_shape_matches_capture() -> None:
