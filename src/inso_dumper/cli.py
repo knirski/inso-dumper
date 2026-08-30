@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from logging import Logger
 from pathlib import Path
@@ -33,7 +34,7 @@ from rich.table import Table
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import load_config
-from inso_dumper.dump.sync import SyncSummary
+from inso_dumper.dump.sync import SyncSummary, run_documents, run_messages
 from inso_dumper.dump.sync import run as sync_run
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
@@ -221,23 +222,88 @@ def _child_to_dict(c: Any) -> dict[str, Any]:
 
 
 class SyncCategory(StrEnum):
-    """The ``--category`` choice set for ``sync``."""
+    """The ``--category`` choice set for ``sync`` (``all`` replaces the
+    pre-release ``both``)."""
 
     ANNOUNCEMENTS = "announcements"
     GALLERIES = "galleries"
-    BOTH = "both"
+    MESSAGES = "messages"
+    DOCUMENTS = "documents"
+    ALL = "all"
 
 
-def _categories_for(choice: SyncCategory) -> list[Category]:
+@dataclass(frozen=True, slots=True)
+class _CategoryPlan:
+    """What one ``--category`` choice expands to. Posts categories are
+    per child; messages and documents are account-level and run exactly
+    once per invocation regardless of the child argument."""
+
+    posts: list[Category]
+    messages: bool
+    documents: bool
+
+
+def _plan_for(choice: SyncCategory) -> _CategoryPlan:
     match choice:
         case SyncCategory.ANNOUNCEMENTS:
-            return [Category.ANNOUNCEMENTS]
+            return _CategoryPlan([Category.ANNOUNCEMENTS], messages=False, documents=False)
         case SyncCategory.GALLERIES:
-            return [Category.GALLERIES]
-        case SyncCategory.BOTH:
-            return [Category.ANNOUNCEMENTS, Category.GALLERIES]
+            return _CategoryPlan([Category.GALLERIES], messages=False, documents=False)
+        case SyncCategory.MESSAGES:
+            return _CategoryPlan([], messages=True, documents=False)
+        case SyncCategory.DOCUMENTS:
+            return _CategoryPlan([], messages=False, documents=True)
+        case SyncCategory.ALL:
+            return _CategoryPlan(
+                [Category.ANNOUNCEMENTS, Category.GALLERIES], messages=True, documents=True
+            )
         case _ as unreachable:
-            return assert_never(unreachable)
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncTotals:
+    """Per-segment summaries; ``None`` when the category did not run."""
+
+    announcements: SyncSummary | None = None
+    galleries: SyncSummary | None = None
+    messages: SyncSummary | None = None
+    documents: SyncSummary | None = None
+
+    @property
+    def seconds(self) -> float:
+        parts = (self.announcements, self.galleries, self.messages, self.documents)
+        return sum(s.seconds for s in parts if s is not None)
+
+    def with_segment(self, name: str, summary: SyncSummary) -> _SyncTotals:
+        """A copy with one segment set, the others preserved."""
+        data = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+        data[name] = summary
+        return _SyncTotals(**data)
+
+
+def _summary_line(totals: _SyncTotals, child_slug: str) -> str:
+    """The design.md summary format: one segment per category that ran;
+    the ``for <child>`` tail covers only the per-child posts segments."""
+    segments: list[str] = []
+    if totals.announcements is not None:
+        s = totals.announcements
+        segments.append(
+            f"{s.posts_new} announcements ({s.posts_skipped} skipped, "
+            f"{s.photos} photos, {s.videos} videos, {s.attachments} attachments)"
+        )
+    if totals.galleries is not None:
+        segments.append(f"{totals.galleries.posts_new} galleries")
+    if totals.messages is not None:
+        s = totals.messages
+        segments.append(
+            f"{s.conversations} conversations ({s.messages} new messages, "
+            f"{s.message_attachments} attachments)"
+        )
+    if totals.documents is not None:
+        segments.append(f"{totals.documents.documents} documents")
+    who = child_slug if (totals.announcements or totals.galleries) else "the account"
+    return f"Synced {', '.join(segments)} for {who} in {totals.seconds:.1f}s."
 
 
 def _ensure_dump_root(root: Path) -> CliResult[Path]:
@@ -255,9 +321,9 @@ def _ensure_dump_root(root: Path) -> CliResult[Path]:
 def sync(
     child_slug: str = typer.Argument(..., help="Child slug as shown by `inso-dumper children`."),
     category: SyncCategory = typer.Option(
-        SyncCategory.BOTH,
+        SyncCategory.ALL,
         "--category",
-        help="Which categories to sync: announcements, galleries, or both.",
+        help="Which categories to sync: announcements, galleries, messages, documents, or all.",
     ),
     dump_root: Path = typer.Option(
         Path("dump"), "--dump-root", help="Dump output directory (created if missing)."
@@ -265,14 +331,18 @@ def sync(
     force: list[str] = typer.Option(
         None,
         "--force",
-        help="Post slug to re-download even if already dumped; repeatable.",
+        help=(
+            "Re-dump even if recorded; repeatable. Posts: slug. Messages: conversation id "
+            "or dir name (refetches history from 0). Documents: re-walk."
+        ),
     ),
     config_path: Path | None = typer.Option(
         None, "--config", help="Alternate TOML config file path."
     ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
 ) -> NoReturn:
-    """Dump announcements and galleries for one child, deduplicated."""
+    """Dump announcements, galleries, messages, and documents (deduplicated,
+    incremental)."""
     setup_logging(verbose=verbose or is_verbose())
     log = get_logger("cli")
 
@@ -288,31 +358,47 @@ def sync(
 
     available: list[str] = []
 
-    async def _do_sync() -> CliResult[SyncSummary]:
+    async def _do_sync() -> CliResult[_SyncTotals]:
         cfg_result = load_config(config_path)
         if isinstance(cfg_result, Err):
             return cfg_result
         cfg = cfg_result.value
-        totals = SyncSummary(0, 0, 0, 0, 0, 0.0)
+        plan = _plan_for(category)
+        totals = _SyncTotals()
         async with HttpxClient(cfg) as client:
-            kids_result = await list_children_shell(client, cfg, session)
-            child: Child | None = None
-            match kids_result:
-                case Err(error):
-                    return Err(error)
-                case Ok(kids):
-                    available.extend(k.slug for k in kids)
-                    child = next((k for k in kids if k.slug == child_slug), None)
-            if child is None:
-                return Err(
-                    CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug")
-                )
-            for cat in _categories_for(category):
-                run_result = await sync_run(
+            if plan.posts:
+                kids_result = await list_children_shell(client, cfg, session)
+                child: Child | None = None
+                match kids_result:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(kids):
+                        available.extend(k.slug for k in kids)
+                        child = next((k for k in kids if k.slug == child_slug), None)
+                if child is None:
+                    return Err(
+                        CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug")
+                    )
+                for cat in plan.posts:
+                    run_result = await sync_run(
+                        client=client,
+                        session=session,
+                        child=child,
+                        category=cat,
+                        dump_root=root,
+                        force=set(force) if force else set(),
+                        log=log,
+                    )
+                    match run_result:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(s):
+                            segment = "announcements" if cat is Category.ANNOUNCEMENTS else "galleries"
+                            totals = totals.with_segment(segment, s)
+            if plan.messages:
+                run_result = await run_messages(
                     client=client,
                     session=session,
-                    child=child,
-                    category=cat,
                     dump_root=root,
                     force=set(force) if force else set(),
                     log=log,
@@ -321,14 +407,25 @@ def sync(
                     case Err(error):
                         return Err(error)
                     case Ok(s):
-                        totals = SyncSummary(
-                            totals.posts_new + s.posts_new,
-                            totals.posts_skipped + s.posts_skipped,
-                            totals.photos + s.photos,
-                            totals.videos + s.videos,
-                            totals.attachments + s.attachments,
-                            totals.seconds + s.seconds,
+                        totals = totals.with_segment("messages", s)
+            if plan.documents:
+                run_result = await run_documents(client=client, session=session, dump_root=root, log=log)
+                match run_result:
+                    case Err(
+                        CliError(kind=CliErrorKind.CONFIG, subject="documents_unverified")
+                    ):
+                        # Gated spike task: drive download shape unverified.
+                        # A loud skip, not a hard failure — the account's
+                        # other categories must not be blocked by it.
+                        log.warning("documents category unavailable: %s", run_result.error.subject)
+                        _console_err.print(
+                            "Documents skipped: drive download shape not yet verified.",
+                            style="yellow",
                         )
+                    case Err(error):
+                        return Err(error)
+                    case Ok(s):
+                        totals = totals.with_segment("documents", s)
         return Ok(totals)
 
     result = _dispatch(_do_sync, log)
@@ -336,14 +433,16 @@ def sync(
         if result.error.subject == "unknown_child_slug" and available:
             _console_err.print(f"Available slugs: {', '.join(available)}", style="yellow")
         _die(result.error, log)
-    summary = result.value
+    totals = result.value
 
     log.info(
-        "sync done child=%s new=%d skipped=%d", child_slug, summary.posts_new, summary.posts_skipped
+        "sync done child=%s announcements=%d skipped=%d conversations=%d",
+        child_slug,
+        totals.announcements.posts_new if totals.announcements else 0,
+        totals.announcements.posts_skipped if totals.announcements else 0,
+        totals.messages.conversations if totals.messages else 0,
     )
     _console_out.print(
-        f"Synced {summary.posts_new} posts ({summary.posts_skipped} skipped, "
-        f"{summary.photos} photos, {summary.videos} videos, "
-        f"{summary.attachments} attachments) for {child_slug} in {summary.seconds:.1f}s."
+        _summary_line(totals, child_slug)
     )
     raise typer.Exit(0)
