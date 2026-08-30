@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import Config
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
@@ -17,6 +19,16 @@ from inso_dumper.models.children import Child
 from inso_dumper.models.session import Session
 
 
+def _points_at_login(url: str) -> bool:
+    """True when ``url`` is the login page (any query string).
+
+    The platform answers a logged-out dashboard request with
+    ``302 Location: /login`` instead of a 401 — the redirect target is
+    the session-expired signal on the HTML path.
+    """
+    return urlparse(url).path.rstrip("/") == "/login"
+
+
 async def list_children(
     client: HttpClient, config: Config, session: Session
 ) -> CliResult[list[Child]]:
@@ -24,10 +36,13 @@ async def list_children(
 
     Redirect responses are followed (bounded, same-origin only): the
     platform 301s the trailing-slash dashboard URL, and ``HttpxClient``
-    deliberately does not auto-follow. A successful fetch that yields an
-    empty menu is ``Ok([])`` — that is a valid user state, not a parser
-    failure. ``Err(PLATFORM_CHANGED)`` is reserved for the parser being
-    unable to find the menu at all.
+    deliberately does not auto-follow. A redirect whose target is the
+    login page means the ``PHPSESSID`` is no longer valid server-side —
+    ``Err(SESSION_EXPIRED)``, never a fetch of the login page (parsing
+    login HTML would misreport as markup drift). A successful fetch that
+    yields an empty menu is ``Ok([])`` — that is a valid user state, not
+    a parser failure. ``Err(PLATFORM_CHANGED)`` is reserved for the
+    parser being unable to find the menu at all.
 
     The shell returns the client's Err unchanged; no translation happens
     at this layer. Mapping Err kinds to exit codes is the CLI's job.
@@ -53,6 +68,8 @@ async def list_children(
         next_url = resolve_location(current_url, base, location)
         if next_url is None:
             return Err(CliError(kind=CliErrorKind.HTTP, subject="off_domain_redirect"))
+        if _points_at_login(next_url):
+            return Err(CliError(kind=CliErrorKind.SESSION_EXPIRED, subject="children_list"))
         current_url = next_url
         next_path = next_url[len(base) :] or "/"
         result = await client.request("GET", next_path, headers=headers)

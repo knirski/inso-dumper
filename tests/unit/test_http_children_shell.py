@@ -115,6 +115,35 @@ def test_list_children_surfaces_redirect_loop() -> None:
     assert result.error.subject == "redirect_loop"
 
 
+def test_list_children_login_redirect_is_session_expired() -> None:
+    """An expired PHPSESSID makes the dashboard 302 to /login (observed
+    live: logged-out sync → GET /panel/home/<uuid>/ → 302 → /login).
+    The shell must report SESSION_EXPIRED without fetching the login
+    page — parsing it would misreport as markup drift."""
+    redirect = (302, b"", [("Location", "/login")])
+    client = FakeHttpClient([redirect, (200, b"<html>login page</html>", [])])
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.SESSION_EXPIRED
+    assert result.error.subject == "children_list"
+    assert len(client.calls) == 1  # the login page is never requested
+
+
+def test_list_children_login_redirect_with_query_is_session_expired() -> None:
+    """A redirect to /login?<params> is the same signal."""
+    redirect = (302, b"", [("Location", "/login?returnUrl=/panel/home/x")])
+    client = FakeHttpClient([redirect])
+    cfg = Config()
+
+    result = asyncio.run(list_children(client, cfg, make_session()))  # type: ignore[arg-type]
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.SESSION_EXPIRED
+
+
 def test_list_children_propagates_http_err() -> None:
     err = CliError(kind=CliErrorKind.HTTP, subject="connect")
     client = FakeHttpClient([Err(err)])
