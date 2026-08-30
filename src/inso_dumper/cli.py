@@ -102,6 +102,10 @@ def _format_error(err: CliError) -> str:
 def _die(err: CliError, log: Logger) -> NoReturn:
     log.error("%s", _format_error(err))
     _console_err.print(_format_error(err), style="red")
+    if err.kind is CliErrorKind.SESSION_EXPIRED:
+        # Covers both the local session-file path and a saved session the
+        # server rejected mid-run (the shell surfaces that as the same kind).
+        _console_err.print("Run `inso-dumper login` first.", style="yellow")
     raise typer.Exit(exit_code_for(err))
 
 
@@ -176,11 +180,6 @@ def children(
 
     session_result = ensure_session_loaded(session_file())
     if isinstance(session_result, Err):
-        if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
-            _console_err.print(
-                "No usable saved session. Run `inso-dumper login` first.",
-                style="yellow",
-            )
         _die(session_result.error, log)
     session = session_result.value
 
@@ -279,11 +278,6 @@ def sync(
 
     session_result = ensure_session_loaded(session_file())
     if isinstance(session_result, Err):
-        if session_result.error.kind is CliErrorKind.SESSION_EXPIRED:
-            _console_err.print(
-                "No usable saved session. Run `inso-dumper login` first.",
-                style="yellow",
-            )
         _die(session_result.error, log)
     session = session_result.value
 
