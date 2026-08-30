@@ -220,9 +220,7 @@ class Manifest:
             self._conn.commit()
         except sqlite3.Error:
             log.warning("conversation manifest upsert failed for %s", conversation_id)
-            return Err(
-                CliError(kind=CliErrorKind.INTERNAL, subject="manifest_conversation_upsert")
-            )
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_conversation_upsert"))
         return Ok(None)
 
     def force_clear_conversation(self, conversation_id: str) -> CliResult[None]:
@@ -264,4 +262,153 @@ def open_manifest(path: Path) -> CliResult[Manifest]:
     return Ok(manifest)
 
 
-__all__ = ["ConversationRecord", "Manifest", "open_manifest"]
+_ALL = ["ConversationRecord", "Manifest", "open_manifest"]
+
+
+_SETTLEMENTS_SCHEMA_VERSION = 4
+
+_SETTLEMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS settlements (
+    month_key             TEXT PRIMARY KEY,
+    bill_uuid             TEXT,
+    invoice_downloaded_at TEXT,
+    first_seen_at         TEXT NOT NULL
+);
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementRecord:
+    """One recorded settlement month: everything the invoice skip
+    decision needs in a single read."""
+
+    month_key: str
+    bill_uuid: str | None
+    invoice_downloaded_at: str | None
+
+
+class SettlementManifest:
+    """Wrapper owning the settlements manifest ``sqlite3.Connection``.
+
+    A separate class (not a ``Manifest`` mode) because the on-disk
+    gate differs: settlement manifests are created at
+    ``user_version = 4`` and any other version is rejected loud. The
+    existing v3 files are distinct databases and stay untouched.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._conn: sqlite3.Connection | None = sqlite3.connect(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, _SETTLEMENTS_SCHEMA_VERSION):
+            self._conn.close()
+            raise _SchemaVersionError(f"user_version={version}")
+        if version == 0:
+            self._conn.executescript(_SETTLEMENTS_SCHEMA)
+            self._conn.execute(f"PRAGMA user_version = {_SETTLEMENTS_SCHEMA_VERSION}")
+            self._conn.commit()
+            version = _SETTLEMENTS_SCHEMA_VERSION
+        self.schema_version = version
+
+    def recorded_settlement(self, month_key: str) -> SettlementRecord | None:
+        """The recorded month, or ``None`` when unknown. The read side
+        of the invoice skip check; a (essentially impossible) query
+        failure reads as "unknown" with a warning."""
+        if self._conn is None:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT month_key, bill_uuid, invoice_downloaded_at"
+                " FROM settlements WHERE month_key = ?",
+                (month_key,),
+            ).fetchone()
+        except sqlite3.Error:
+            log.warning("settlements manifest read failed for %s", month_key)
+            return None
+        if row is None:
+            return None
+        return SettlementRecord(
+            month_key=str(row[0]),
+            bill_uuid=str(row[1]) if row[1] is not None else None,
+            invoice_downloaded_at=(str(row[2]) if row[2] is not None else None),
+        )
+
+    def upsert_settlement(
+        self, month_key: str, bill_uuid: str | None, invoice_downloaded_at: str | None
+    ) -> CliResult[None]:
+        """Insert or update by ``month_key`` (sole key);
+        ``first_seen_at`` is set on insert and preserved on update."""
+        if self._conn is None:
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_closed"))
+        now = datetime.now(UTC).isoformat()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO settlements (month_key, bill_uuid,
+                                         invoice_downloaded_at, first_seen_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(month_key) DO UPDATE SET
+                    bill_uuid = excluded.bill_uuid,
+                    invoice_downloaded_at = excluded.invoice_downloaded_at
+                """,
+                (month_key, bill_uuid, invoice_downloaded_at, now),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            log.warning("settlements manifest upsert failed for %s", month_key)
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_settlement_upsert"))
+        return Ok(None)
+
+    def force_clear_settlements(self, month_key: str) -> CliResult[None]:
+        """Remove the month row; used by ``--force`` before a re-dump
+        so an interrupted forced run leaves no stale row."""
+        if self._conn is None:
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_closed"))
+        try:
+            self._conn.execute("DELETE FROM settlements WHERE month_key = ?", (month_key,))
+            self._conn.commit()
+        except sqlite3.Error:
+            return Err(
+                CliError(kind=CliErrorKind.INTERNAL, subject="manifest_settlement_force_clear")
+            )
+        return Ok(None)
+
+    def close(self) -> None:
+        """Idempotent close."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+
+def open_settlements_manifest(path: Path) -> CliResult[SettlementManifest]:
+    """Open (creating in place) the settlements manifest at ``path``."""
+    try:
+        manifest = SettlementManifest(path)
+    except _SchemaVersionError:
+        log.warning(
+            "settlements manifest at %s has an incompatible schema version;"
+            " documented recovery: delete the file (dump output is untouched)",
+            path,
+        )
+        return Err(CliError(kind=CliErrorKind.CONFIG, subject="manifest_schema"))
+    except sqlite3.Error:
+        log.warning("cannot open settlements manifest at %s", path)
+        return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_open"))
+    except OSError:
+        log.warning("cannot create settlements manifest location at %s", path)
+        return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_open"))
+    return Ok(manifest)
+
+
+__all__ = [
+    "ConversationRecord",
+    "Manifest",
+    "SettlementManifest",
+    "SettlementRecord",
+    "open_manifest",
+    "open_settlements_manifest",
+]

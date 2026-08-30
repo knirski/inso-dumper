@@ -320,3 +320,142 @@ def test_open_manifest_maps_oserror_to_internal(
     assert isinstance(result, Err)
     assert result.error.kind is CliErrorKind.INTERNAL
     assert result.error.subject == "manifest_open"
+
+
+# --- SettlementManifest (schema v4) ------------------------------------------
+
+from inso_dumper.dump.manifest import (  # noqa: E402
+    SettlementRecord,
+    open_settlements_manifest,
+)
+
+
+def test_open_settlements_manifest_sets_user_version(tmp_path: Path) -> None:
+    path = tmp_path / "settlements" / ".manifest.sqlite"
+    result = open_settlements_manifest(path)
+
+    assert isinstance(result, Ok)
+    m = result.value
+    try:
+        assert m.schema_version == 4
+        assert path.is_file()
+        conn = sqlite3.connect(path)
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        conn.close()
+        assert "settlements" in tables
+    finally:
+        m.close()
+
+
+def test_settlements_manifest_file_is_0600(tmp_path: Path) -> None:
+    path = tmp_path / "m.sqlite"
+    result = open_settlements_manifest(path)
+
+    assert isinstance(result, Ok)
+    try:
+        assert path.stat().st_mode & 0o777 == 0o600
+    finally:
+        result.value.close()
+
+
+def test_settlements_manifest_rejects_v3_file(tmp_path: Path) -> None:
+    """A v3 (posts/conversations) manifest at the settlements path is a
+    loud CONFIG error with the delete-the-file recovery — no migration."""
+    path = tmp_path / "settlements" / ".manifest.sqlite"
+    v3 = open_manifest(path)
+    assert isinstance(v3, Ok)
+    v3.value.close()
+
+    result = open_settlements_manifest(path)
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.CONFIG
+    assert result.error.subject == "manifest_schema"
+
+
+def test_settlements_manifest_rejects_future_version(tmp_path: Path) -> None:
+    path = tmp_path / "m.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE x (y TEXT)")
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    result = open_settlements_manifest(path)
+    assert isinstance(result, Err)
+    assert result.error.subject == "manifest_schema"
+
+
+def test_settlements_recorded_unknown_is_none(tmp_path: Path) -> None:
+    m = open_settlements_manifest(tmp_path / "m.sqlite")
+    assert isinstance(m, Ok)
+    try:
+        assert m.value.recorded_settlement("2026-08") is None
+    finally:
+        m.value.close()
+
+
+def test_settlements_upsert_then_record(tmp_path: Path) -> None:
+    m = open_settlements_manifest(tmp_path / "m.sqlite")
+    assert isinstance(m, Ok)
+    try:
+        result = m.value.upsert_settlement(
+            month_key="2026-08",
+            bill_uuid="0b5b2e76-6473-4166-8fed-d864e8845a81",
+            invoice_downloaded_at="2026-08-30T10:00:00+00:00",
+        )
+        assert isinstance(result, Ok)
+        record = m.value.recorded_settlement("2026-08")
+        assert record == SettlementRecord(
+            month_key="2026-08",
+            bill_uuid="0b5b2e76-6473-4166-8fed-d864e8845a81",
+            invoice_downloaded_at="2026-08-30T10:00:00+00:00",
+        )
+    finally:
+        m.value.close()
+
+
+def test_settlements_upsert_preserves_first_seen_at(tmp_path: Path) -> None:
+    m = open_settlements_manifest(tmp_path / "m.sqlite")
+    assert isinstance(m, Ok)
+    try:
+        assert isinstance(m.value.upsert_settlement("2026-08", None, None), Ok)
+        first = m.value.recorded_settlement("2026-08")
+        assert first is not None
+        # Re-record with updated invoice state.
+        assert isinstance(
+            m.value.upsert_settlement("2026-08", None, "2026-08-30T11:00:00+00:00"), Ok
+        )
+        again = m.value.recorded_settlement("2026-08")
+        assert again is not None
+        # first_seen_at is not exposed on the record; verify via SQL.
+        conn = sqlite3.connect(tmp_path / "m.sqlite")
+        rows = conn.execute(
+            "SELECT first_seen_at FROM settlements WHERE month_key = '2026-08'"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1  # single row, updated in place
+    finally:
+        m.value.close()
+
+
+def test_settlements_force_clear(tmp_path: Path) -> None:
+    m = open_settlements_manifest(tmp_path / "m.sqlite")
+    assert isinstance(m, Ok)
+    try:
+        assert isinstance(m.value.upsert_settlement("2026-08", None, None), Ok)
+        assert isinstance(m.value.upsert_settlement("2026-07", None, None), Ok)
+        assert isinstance(m.value.force_clear_settlements("2026-08"), Ok)
+        assert m.value.recorded_settlement("2026-08") is None
+        assert m.value.recorded_settlement("2026-07") is not None
+    finally:
+        m.value.close()
+
+
+def test_settlements_read_after_close_degrades(tmp_path: Path) -> None:
+    m = open_settlements_manifest(tmp_path / "m.sqlite")
+    assert isinstance(m, Ok)
+    m.value.close()
+    assert m.value.recorded_settlement("2026-08") is None
