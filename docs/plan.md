@@ -100,12 +100,19 @@ posts); a new announcement/message appears after the next sync.
 - ⬜ `materialize` command (resolve hardlinks/symlinks to copies).
 - ⬜ README with privacy notes; packaging (`uv tool install`).
 
-## Phase 7 — Settlements follow-up spec ⬜
+## Phase 7 — Settlements follow-up spec 🔄
 
-Read-only dump of "Rozliczenia" (`/panel/billing/<child-uuid>/`):
-server-rendered HTML scrape + invoice PDF downloads. Needs its own spike +
-spec; PRD non-goals amended to permit read-only billing access (no writes,
-ever).
+- ✅ Discovery spike done (browser session, Aug 2026): settlements is
+  **fully server-rendered HTML** (no JSON API). Two listing pages —
+  current month `/panel/settlement/child/<uuid>` and full history
+  `/panel/child/<uuid>/settlement` (single page, no pagination) — plus
+  direct `application/pdf` invoice downloads at
+  `/panel/settlement/<bill-uuid>/invoice` (session-cookie auth, no
+  CloudFront signing). Findings in `api-notes.md` § Settlements.
+- ⬜ Follow-up spec (design + plan): per-child HTML scrape of both
+  pages, itemized-details parse, invoice PDF downloads, Polish
+  month-name date normalization; unpaid/partial-saldo variants remain
+  unverified — parsers fail loud.
 
 ## Risks / mitigations
 

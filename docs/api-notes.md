@@ -19,6 +19,7 @@ are JSON endpoints discovered in the follow-up spikes:
 | Announcements/galleries | `GET /system-api/timeline/posts` | fully (3 pages + real syncs) |
 | Messages | `GET /system-api/conversations[/{id}]` | fully (list + 2 history pages) |
 | Documents (drive) | `GET /drive/items[/{directoryId}]` | `breadcrumbs` only (empty drive) |
+| Settlements (Rozliczenia) | server-rendered `/panel/settlement/child/<uuid>` + `/panel/child/<uuid>/settlement` | fully (2 pages + invoice PDF) |
 
 The original "no JSON API" conclusion from the login spike applied only
 to the pages the first spike visited; see the endpoint sections below.
@@ -311,19 +312,86 @@ to be CloudFront-signed like the rest of `file.inso.pl` — **unverified**.
 Forbidden (never called): all `/drive/directory*` and `/drive/file*`
 write endpoints.
 
+## Settlements (Rozliczenia) — server-rendered HTML (billing spike, Aug 2026)
+
+Unlike every other content surface, settlements has **no JSON API**: the
+pages are plain server-rendered documents and the only XHR observed is
+the shared `system-api/notifications` badge poller. All data lives in
+the markup.
+
+### URL patterns (the PRD sketch guessed wrong)
+
+| Page | URL | Verified |
+| --- | --- | --- |
+| Current month (summary card) | `GET /panel/settlement/child/<child-uuid>` | fully |
+| Full history ("Starsze rachunki" link) | `GET /panel/child/<child-uuid>/settlement` | fully |
+| Invoice download | `GET /panel/settlement/<bill-uuid>/invoice` | fully |
+
+The history page lists **every month on one page** — October 2022 →
+August 2026 (47 cards) on the spike account, no pagination, no
+load-more. The "Starsze rachunki" control is a link to the second
+pattern, not an in-place expander.
+
+### Month card markup
+
+Tailwind-based cards (divs on the history page, wrapped in a `<form>`
+on the current-month page). Per card:
+
+- child initials badge, `Rozliczenia` title, status badge
+  `<span class="…bg-green-100…">opłacone</span>`
+- `Kwota`, `Saldo`, `Termin` lines — the due date is human text with
+  Polish month names (`Termin 11 sierpnia 2026`; no space after
+  `Termin` in the current-month variant) and needs a month-name map to
+  normalize
+- a `Zobacz szczegóły` expander — **client-side toggle, fires no
+  request**
+
+### Details (expander content)
+
+A `Składowe rachunku` `<table>` with itemized rows (`Czesne`, per-meal
+lines with counts, `Suma`), then `Do zapłaty`, `Zapłacono`,
+`Aktualne saldo`, and a `Pobierz fakturę` link when an invoice exists.
+
+### Invoice download
+
+`GET /panel/settlement/<bill-uuid>/invoice` returns the PDF **directly**
+(`200`, `application/pdf`, ~46 KB captured), same-origin, authenticated
+by the session cookie — **no CloudFront signing**, unlike timeline
+media. `bill-uuid` is per-bill and unrelated to the child uuid.
+
+### Read-only notes
+
+Every useful request is a GET. The page also offers a payment flow
+(`Zapłać` button, traditional-transfer instructions) — never touched;
+the dumper only ever issues the two listing GETs and invoice downloads.
+
+### Captures
+
+`docs/api-notes-data/billing-{page,main,main-details,history-page}.html`
+and `billing-session.har` (41 requests; includes the interactive login —
+credentials redact-before-commit if ever moved).
+
+### Unverified (none present on the spike account)
+
+- unpaid / overdue status badge variants (every captured card is
+  `opłacone`; `saldo 0,00`)
+- a bill **without** an invoice link (whether `Pobierz fakturę` can be
+  absent)
+- partial payments (`Saldo` ≠ `0,00 zł`)
+
 ## Other endpoints discovered (out of scope for v1)
 
 These URLs appeared in the sidebar's navigation links. The JSON-backed
 ones are covered by the sections above; the rest are server-rendered
-HTML pages (not yet spiked) — the settlements follow-up spec targets
-Rozliczenia (read-only).
+HTML pages. The settlements pages are now spiked too (§ Settlements);
+the remaining sections stay out of scope for v1.
 
 | Section | URL pattern | What it shows |
 | --- | --- | --- |
 | Dashboard (Podsumowanie) | `/panel/home/<child-uuid>/` | Today's summary; sidebar; children scrape |
 | Messages (Wiadomości) | `/messages?child=<child-uuid>` | HTML shell for the conversations JSON API |
 | Announcements (Ogłoszenia) | `/timeline/child/<child-uuid>` | HTML shell for the timeline JSON API |
-| Billing (Rozliczenia) | `/panel/billing/<child-uuid>/` | Fees + invoices — read-only dump planned (M6) |
+| Billing (Rozliczenia) | `/panel/settlement/child/<child-uuid>` (current) + `/panel/child/<child-uuid>/settlement` (history) | Fees + invoices — read-only dump planned (M6); see § Settlements |
 | Attendance calendar | `/panel/attendance/<child-uuid>/` | Calendar |
 | Events | `/events/child/<child-uuid>` | Events list |
 | Files (Pliki) | `/panel/files/<child-uuid>/` | HTML shell for the drive JSON API |
