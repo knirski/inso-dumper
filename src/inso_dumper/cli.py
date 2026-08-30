@@ -21,6 +21,7 @@ import dataclasses
 import json
 import os
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -41,6 +42,7 @@ from inso_dumper.dump.sync import (
     run_settlements,
 )
 from inso_dumper.dump.sync import run as sync_run
+from inso_dumper.dump.indexing import DumpIndex, write_index
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
 from inso_dumper.http.client import HttpxClient
@@ -254,9 +256,7 @@ class _CategoryPlan:
 def _plan_for(choice: SyncCategory) -> _CategoryPlan:
     match choice:
         case SyncCategory.ANNOUNCEMENTS:
-            return _CategoryPlan(
-                [Category.ANNOUNCEMENTS], messages=False, documents=False
-            )
+            return _CategoryPlan([Category.ANNOUNCEMENTS], messages=False, documents=False)
         case SyncCategory.GALLERIES:
             return _CategoryPlan([Category.GALLERIES], messages=False, documents=False)
         case SyncCategory.MESSAGES:
@@ -415,9 +415,7 @@ def sync(
                         child = next((k for k in kids if k.slug == child_slug), None)
                 if child is None:
                     return Err(
-                        CliError(
-                            kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug"
-                        )
+                        CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug")
                     )
             if plan.posts:
                 assert child is not None  # per-child posts ⇒ resolved above
@@ -453,11 +451,11 @@ def sync(
                     case Ok(s):
                         totals = totals.with_segment("messages", s)
             if plan.documents:
-                run_result = await run_documents(client=client, session=session, dump_root=root, log=log)
+                run_result = await run_documents(
+                    client=client, session=session, dump_root=root, log=log
+                )
                 match run_result:
-                    case Err(
-                        CliError(kind=CliErrorKind.CONFIG, subject="documents_unverified")
-                    ):
+                    case Err(CliError(kind=CliErrorKind.CONFIG, subject="documents_unverified")):
                         # Gated spike task: drive download shape unverified.
                         # A loud skip, not a hard failure — the account's
                         # other categories must not be blocked by it.
@@ -505,7 +503,49 @@ def sync(
         totals.announcements.posts_skipped if totals.announcements else 0,
         totals.messages.conversations if totals.messages else 0,
     )
+    _console_out.print(_summary_line(totals, child_slug))
+    raise typer.Exit(0)
+
+
+@app.command()
+def index(
+    dump_root: Path = typer.Option(
+        Path("dump"), "--dump-root", help="Dump directory to index (created if missing)."
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """(Re)build _index.json and the top-level/event index.html pages.
+
+    Fully offline: scans the dump tree, needs no session or network.
+    Safe to re-run any time; skips malformed entries with a warning.
+    """
+    setup_logging(verbose=verbose or is_verbose())
+    log = get_logger("cli")
+
+    root = dump_root.expanduser().resolve()
+    root_result = _ensure_dump_root(root)
+    if isinstance(root_result, Err):
+        _die(root_result.error, log)
+
+    async def _do_index() -> CliResult[DumpIndex]:
+        return write_index(root, log=log)
+
+    start = time.monotonic()
+    result = _dispatch(_do_index, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    idx = result.value
+    events = sum(len(c.events) for c in idx.children)
+    log.info(
+        "index done children=%d events=%d conversations=%d settlements=%d",
+        len(idx.children),
+        events,
+        len(idx.conversations),
+        len(idx.settlements),
+    )
     _console_out.print(
-        _summary_line(totals, child_slug)
+        f"Indexed {events} events across {len(idx.children)} children "
+        f"({len(idx.conversations)} conversations, {len(idx.settlements)} settlement "
+        f"children) in {time.monotonic() - start:.1f}s."
     )
     raise typer.Exit(0)
