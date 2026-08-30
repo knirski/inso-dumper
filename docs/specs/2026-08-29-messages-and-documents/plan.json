@@ -1,0 +1,418 @@
+{
+  "feature": "messages-and-documents",
+  "spec": "docs/specs/2026-08-29-messages-and-documents/design.md",
+  "goal": "Dump the communicator (conversations, full message histories, attachments) and the drive documents tree with incremental re-runs, extending the existing sync pipeline.",
+  "preserved_behavior": [
+    "inso-dumper login and children, and the announcements/galleries sync path (timeline client, posts manifest table, dir_name rule) are unchanged.",
+    "CLI exit codes (2/3/4/5/6/99) and the closed CliErrorKind union are unchanged; no new exit code is added.",
+    "Read-only guarantee: only GET requests are ever issued; POST /system-api/conversations/read-all-unread (mark-as-read), POST /system-api/messages/attachment (upload), and all /drive/directory* and /drive/file* write endpoints are never called (test-pinned).",
+    "Disk invariants: dump/ 0700 dirs, 0600 files, gitignored output; signed URLs never relied on (bytes in _common/ are the durable artifact).",
+    "Manifest schema gate: a manifest with PRAGMA user_version not in {0, 3} is rejected with Err(CONFIG, 'manifest_schema') — loud, no silent migration; the v2 posts table and its accessors are unchanged.",
+    "AGENTS.md rules (uv-only, functional core / imperative shell, Result-typed boundaries that never raise, match/assert_never for closed unions) are honored end-to-end."
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Messages and drive models plus pure parsers",
+      "tasks": [
+        {
+          "id": "T1",
+          "name": "Captured-payload models for conversations and messages",
+          "depends_on": [],
+          "inputs": [
+            "spike captures docs/api-notes-data/conversations-sample.json and conversation-detail-sample.json",
+            "models/timeline.py house pattern (extra='forbid', camelCase aliases, populate_by_name, no-IO docstring)"
+          ],
+          "description": "Create src/inso_dumper/models/messages.py with pydantic models mirroring the captured payloads: ConversationRecipient {name, description, type, prefix}; Conversation {id, last_update (alias lastUpdate), recipient, read, branch, participants_names (alias participantsNames), excerpt}; ConversationListPage {categories: list[object], category, conversations: list[Conversation], templates: list[object], unread_count (alias unreadCount)} with the permissive lists documented as captured-but-ignored; MessageSender {type, name, initials, avatar: str | None}; MessageAttachment {name, url: {thumb, full}, is_video (alias isVideo)}; MessageAttachments {media: list[MessageAttachment], other: list[object]} with other flagged as unverified shape (design Open Question 2); Message {id, message, send_date (alias sendDate, verbatim), send_timestamp (alias sendTimestamp), sender, incoming, attachments, main, is_removed (alias isRemoved), can_remove (alias canRemove)}. Module docstring documents the functional-core / no-IO contract.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/models/messages.py",
+              "tests/unit/test_models_messages.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "Conversation, ConversationListPage, Message, MessageAttachments",
+              "requirement": "typed mirrors of the captured communicator payloads so the parsers never pass dicts and unknown keys fail loud",
+              "consumers": [
+                "http/messages.py parsers and shells",
+                "dump/messages.py writer",
+                "dump/sync.py"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "every conversation in conversations-sample.json validates",
+              "every message in conversation-detail-sample.json validates",
+              "unknown key in a conversation or message raises ValidationError",
+              "alias round-trip: model_dump_json() emits snake_case and revalidates with populate_by_name",
+              "MessageAttachments accepts the captured {'media': [...], 'other': []} dict shape"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_models_messages.py -q is green",
+              "uv run basedpyright src/inso_dumper/models/messages.py is clean"
+            ]
+          }
+        },
+        {
+          "id": "T2",
+          "name": "Pure parsers for the conversations and messages envelopes",
+          "depends_on": ["T1"],
+          "inputs": [
+            "design.md Findings section (the messages envelope is a BARE LIST — no wrapper)",
+            "http/timeline.py parser pattern (json.loads -> model_validate, drift -> PLATFORM_CHANGED)"
+          ],
+          "description": "Create src/inso_dumper/http/messages.py with parse_conversations_page(body: bytes) -> CliResult[ConversationListPage] and parse_messages_page(body: bytes) -> CliResult[list[Message]]. parse_messages_page validates a top-level JSON list (not an envelope); a non-list body is drift. Malformed JSON (incl. non-UTF-8) or unknown keys -> Err(CliError(PLATFORM_CHANGED, subject='conversations_page' | 'messages_page')). Empty list -> Ok([]). Module docstring states the pure contract; shells (T4/T5) are the only consumers.",
+          "files": {
+            "reuse": [],
+            "create": [
+              "tests/unit/test_http_messages.py"
+            ],
+            "modify": [
+              "src/inso_dumper/http/messages.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "both spike captures parse with documented counts",
+              "empty conversations page and empty message list return Ok",
+              "unknown key in envelope or message -> Err(PLATFORM_CHANGED) with the right subject",
+              "malformed JSON and non-UTF-8 bytes -> Err(PLATFORM_CHANGED)",
+              "non-list body for messages -> Err(PLATFORM_CHANGED, 'messages_page')"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_http_messages.py -q is green",
+              "parsers are exported via __all__"
+            ]
+          }
+        },
+        {
+          "id": "T3",
+          "name": "Provisional drive models and listing parser",
+          "depends_on": ["T1"],
+          "inputs": [
+            "docs/api-notes-data/drive-items-sample.json (only breadcrumbs verified — drive was empty)",
+            "design.md gotcha: directories/files shapes are provisional (videos precedent)"
+          ],
+          "description": "Create src/inso_dumper/models/drive.py with DriveBreadcrumb {name: str, id: str | None} (strict, extra='forbid') and DriveListing {breadcrumbs: list[DriveBreadcrumb], directories: list[object], directory: object | None, files: list[object]} — the permissive fields carry docstrings flagging them as provisional pending a non-empty drive capture. Create src/inso_dumper/http/drive.py with parse_drive_listing(body: bytes) -> CliResult[DriveListing]; drift in the verified parts -> Err(CliError(PLATFORM_CHANGED, subject='drive_listing')).",
+          "files": {
+            "reuse": [],
+            "create": [
+              "src/inso_dumper/models/drive.py",
+              "src/inso_dumper/http/drive.py",
+              "tests/unit/test_models_drive.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "DriveListing",
+              "requirement": "walk the drive tree without inventing unverified node shapes; permissive fields keep extra=forbid accepting the captured envelope",
+              "consumers": [
+                "walk_drive (T6)",
+                "dump/sync.py sync_documents"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "the captured empty-drive listing parses; breadcrumbs validated strictly",
+              "permissive fields accept arbitrary lists/objects",
+              "unknown key in breadcrumbs or envelope -> Err(PLATFORM_CHANGED, 'drive_listing')",
+              "malformed JSON -> Err(PLATFORM_CHANGED)"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_models_drive.py -q is green"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "HTTP shells: conversation list, message pages, drive walk",
+      "tasks": [
+        {
+          "id": "T4",
+          "name": "list_conversations shell with loadOlder walk",
+          "depends_on": ["T2"],
+          "inputs": [
+            "list_posts house pattern (async generator yielding CliResult items, Err ends iteration)",
+            "design.md Findings: ?category=main, &loadOlder=1 on subsequent pages, empty page stops"
+          ],
+          "description": "Add to src/inso_dumper/http/messages.py an async def list_conversations(client, session) -> AsyncIterator[CliResult[Conversation]]: first page GET /system-api/conversations?category=main, subsequent pages add &loadOlder=1; PHPSESSID cookie header on every request; yields Ok(conversation) per conversation; stops when a page's conversations list is empty; non-200 -> Err(CliError(HTTP, subject=f'conversations_status_{status}')); transport Err propagated unchanged. Never calls read-all-unread.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/client.py (HttpClient Protocol)",
+              "src/inso_dumper/models/session.py (Session)"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/http/messages.py",
+              "tests/unit/test_http_messages.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "two-page scripted walk (2 + 3 conversations, then empty) yields 5 conversations and asserts both request paths (second carries loadOlder=1)",
+              "empty first page yields nothing and stops after one request",
+              "non-200 surfaces Err(HTTP, 'conversations_status_500')",
+              "client Err propagated unchanged and iteration ends",
+              "no request path ever contains read-all-unread"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_http_messages.py -q is green",
+              "list_conversations exported in __all__"
+            ]
+          }
+        },
+        {
+          "id": "T5",
+          "name": "fetch_messages shell with startingIndex pagination",
+          "depends_on": ["T2"],
+          "inputs": [
+            "design.md Findings: GET /system-api/conversations/{id}?messages=1[&startingIndex=N], 30 messages per page (verified)"
+          ],
+          "description": "Add to src/inso_dumper/http/messages.py an async def fetch_messages(client, session, conversation_id: str, starting_index: int = 0) -> AsyncIterator[CliResult[list[Message]]]: builds f'/system-api/conversations/{conversation_id}?messages=1&startingIndex={starting_index}', yields each parsed page as a list, advances starting_index by the page length, stops when a page yields fewer than 30 items (or 0). Error mapping mirrors T4 with subject f'messages_status_{status}'. The consumer dedupes by message id, so boundary overlap is harmless.",
+          "files": {
+            "reuse": [],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/http/messages.py",
+              "tests/unit/test_http_messages.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "scripted 30 + 30 + 12 walk yields three pages in order with startingIndex 0, 30, 60 and stops after the short page",
+              "single short page (5 messages) yields one page and stops",
+              "non-200 surfaces Err(HTTP, 'messages_status_403')",
+              "client Err propagated unchanged"
+            ],
+            "acceptance": [
+              "fetch_messages exported in __all__",
+              "uv run pytest tests/unit/test_http_messages.py -q is green"
+            ]
+          }
+        },
+        {
+          "id": "T6",
+          "name": "walk_drive shell: depth-first listing traversal",
+          "depends_on": ["T3"],
+          "inputs": [
+            "design.md API Design: GET /drive/items[/{directoryId}], DFS until a directory yields no new directories",
+            "provisional node shapes: extract id/name defensively from the permissive directories objects, drift -> Err(PLATFORM_CHANGED, 'drive_node')"
+          ],
+          "description": "Add to src/inso_dumper/http/drive.py an async def walk_drive(client, session) -> AsyncIterator[CliResult[tuple[str, DriveListing]]]: fetch /drive/items, yield ('', listing), then for each entry in listing.directories extract id and name (missing/blank -> Err(PLATFORM_CHANGED, 'drive_node')), descend via GET /drive/items/{id}, yield (relative_path, listing) where relative_path joins directory names with '/', recursing depth-first. Error mapping mirrors T4/T5 with subject f'drive_status_{status}'. Read-only: no /drive/directory* or /drive/file* write paths are ever requested.",
+          "files": {
+            "reuse": [],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/http/drive.py",
+              "tests/unit/test_models_drive.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "synthetic nested listing (root with two dirs, one with a subdir) yields correct relative paths in DFS order with one request per directory",
+              "empty drive yields exactly one ('', listing) entry",
+              "directory entry missing id -> Err(PLATFORM_CHANGED, 'drive_node')",
+              "non-200 surfaces Err(HTTP, 'drive_status_500'); client Err propagated",
+              "no request path ever contains /drive/directory/ or /drive/file/ write endpoints"
+            ],
+            "acceptance": [
+              "walk_drive exported in __all__",
+              "uv run pytest tests/unit/test_models_drive.py -q is green"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "Manifest v3, conversation writer, sync orchestrators",
+      "tasks": [
+        {
+          "id": "T7",
+          "name": "Manifest schema v3: conversations table",
+          "depends_on": [],
+          "inputs": [
+            "dump/manifest.py (v2: posts table, recorded_dir, upsert, force_clear, open_manifest gate)",
+            "design.md Data Model (schema v3, PRAGMA user_version = 3)"
+          ],
+          "description": "Modify src/inso_dumper/dump/manifest.py: bump _SCHEMA_VERSION to 3; add CREATE TABLE IF NOT EXISTS conversations (conversation_id TEXT PRIMARY KEY, dir_name TEXT NOT NULL, last_update INTEGER NOT NULL, message_count INTEGER NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL) to the schema script; schema gate becomes user_version not in (0, 3) -> Err(CONFIG, 'manifest_schema'). New frozen-slots dataclass ConversationRecord (conversation_id, dir_name, last_update, message_count). Accessors follow the established swallow-and-warn read semantics: recorded_conversation(post_id -> conversation_id) -> ConversationRecord | None; upsert_conversation(...) with ON CONFLICT(conversation_id) DO UPDATE (dir_name, last_update, message_count, last_seen_at); force_clear_conversation(id). Posts table and accessors unchanged.",
+          "files": {
+            "reuse": [],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/dump/manifest.py",
+              "tests/unit/test_dump_manifest.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "ConversationRecord",
+              "requirement": "skip/tail decisions need the recorded last_update, message_count, and dir_name in one read",
+              "consumers": [
+                "dump/sync.py sync_messages"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "fresh open sets user_version 3 and creates both tables",
+              "upsert_conversation then recorded_conversation round-trips all fields",
+              "upsert with same conversation_id updates dir_name/last_update/message_count in place (first_seen_at preserved)",
+              "force_clear_conversation removes the row",
+              "a user_version=2 manifest -> Err(CONFIG, 'manifest_schema')",
+              "BrokenConn -> Err(INTERNAL, 'manifest_upsert' / 'manifest_conversation_read')",
+              "posts accessors still pass their existing tests unchanged"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_dump_manifest.py -q is green"
+            ]
+          }
+        },
+        {
+          "id": "T8",
+          "name": "dump/messages.py: conversation disk writer",
+          "depends_on": ["T1", "T7"],
+          "inputs": [
+            "dump/writer.py (ensure_private_dir, write_deduped_media, link_media_to_post, _write_bytes pattern)",
+            "dump/layout.py (sha256_hex, models ext_from)",
+            "design.md Storage layout: dump/messages/<dir>/{conversation.json, messages.json, attachments/<message-id>/}"
+          ],
+          "description": "Create src/inso_dumper/dump/messages.py (shell; all disk errors -> Err(CliError(INTERNAL, subject='messages_<op>'))): (1) resolve_conversation_dir(dump_root, conversation, recorded) -> Path — dir name f'{lastUpdate date}-{slugified recipient.name}' (slug via the shared _slugify rule from dump/layout); when recorded exists return dump_root/'messages'/recorded.dir_name (assigned once); collisions with a foreign conversation.json get the next -N suffix (posts recovery rule); (2) write_conversation(conversation, messages, dir) -> CliResult[Path] — writes conversation.json (model_dump_json with dumped_at set) and messages.json (list of messages) atomically, 0600; (3) append_messages(dir, new_messages) -> CliResult[int] — read existing messages.json, merge new messages by id (skip ids already present), atomic rewrite, returns the number added; (4) link_message_attachment(dump_root, dir, message_id, n, name, url, data, is_video, log) -> CliResult[Path] — kind mapping is_video -> 'videos', image extension via ext_from -> 'photos', else 'attachments'; write_deduped_media then link into dir/'attachments'/message_id/f'{n}{ext}'.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/dump/writer.py",
+              "src/inso_dumper/dump/layout.py",
+              "src/inso_dumper/models/children.py (_SLUG_RE, _ascii_fold via dump.layout's shared rule)"
+            ],
+            "create": [
+              "src/inso_dumper/dump/messages.py",
+              "tests/unit/test_dump_messages.py"
+            ],
+            "modify": [],
+            "delete": []
+          },
+          "new_abstractions": [
+            {
+              "name": "resolve_conversation_dir, write_conversation, append_messages, link_message_attachment",
+              "requirement": "conversation disk policy (naming, atomic append, attachment links) in one shell module per the design's layer table",
+              "consumers": [
+                "dump/sync.py sync_messages"
+              ]
+            }
+          ],
+          "validation": {
+            "tests": [
+              "dir name formats date + slugged recipient (diacritics folded)",
+              "recorded dir_name wins over recomputation; foreign-content collision gets -N suffix",
+              "write_conversation creates both JSONs, 0600, round-trips",
+              "append_messages merges by id, preserves order of existing, returns added count, and is idempotent on retry",
+              "simulated OSError mid-rewrite leaves the old messages.json intact and returns Err(INTERNAL)",
+              "link_message_attachment maps is_video to videos/ and images to photos/ and creates resolving symlinks into _common/"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_dump_messages.py -q is green"
+            ]
+          }
+        },
+        {
+          "id": "T9",
+          "name": "sync_messages, sync_documents, and category dispatch",
+          "depends_on": ["T4", "T5", "T6", "T7", "T8"],
+          "inputs": [
+            "dump/sync.py run() dispatch and SyncSummary",
+            "design.md sync-flow pseudo-code and US-1/2/3/4/5"
+          ],
+          "description": "Modify src/inso_dumper/dump/sync.py. SyncSummary gains conversations: int = 0, messages: int = 0, message_attachments: int = 0, documents: int = 0 (keyword construction everywhere). sync_messages(client, session, dump_root, manifest, force, log): for each conversation from list_conversations: recorded = manifest.recorded_conversation(id); skip when recorded and recorded.last_update == conversation.last_update and slug/id not in forced; starting = recorded.message_count if recorded and not forced else 0; if forced (id or dir_name match) manifest.force_clear_conversation(id); collect tail pages from fetch_messages(id, starting); resolve dir; write_conversation (new) or append_messages (tail); for each attachment of NEW messages: download via download_media-style fetch (reuse the timeline download pattern with the attachment's url.full) then link_message_attachment; upsert_conversation(id, dir.name, last_update, new total count). sync_documents(client, session, dump_root, log): if the drive download URL has not been verified against a non-empty capture (module-level flag set by the gated spike task), return Err(CliError(HTTP, subject='documents_unverified')) — fail safe, never guess; once verified, walk_drive: per file entry download -> write_deduped_media -> place link under dump/documents/<relative_path>. run() gains a category dispatch mapping Category-like choices to (sync_announcements/galleries timeline path) + sync_messages + sync_documents, all Err short-circuiting as today. Regression test pins that no request path matches the forbidden write endpoints.",
+          "files": {
+            "reuse": [
+              "src/inso_dumper/http/timeline.py (download_media pattern)",
+              "src/inso_dumper/dump/manifest.py",
+              "src/inso_dumper/dump/writer.py"
+            ],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/dump/sync.py",
+              "tests/unit/test_dump_sync.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "scripted two-conversation run (one with a photo attachment) creates dirs, conversation.json + messages.json, _common bytes, links, manifest rows, and correct summary counters",
+              "second identical run: conversations skipped (0 new messages), no requests beyond the conversations list",
+              "fixture gains a new message with changed last_update: tail fetch issues startingIndex=<old count> only, prior messages preserved, message_count updated",
+              "last_update changed but count equal still tail-fetches (fetch is driven by the counter, verified by assertion)",
+              "--force with the conversation id clears the row and refetches from startingIndex 0",
+              "sync_documents on an unverified-URL gate returns Err(HTTP, 'documents_unverified') without network calls",
+              "no request path matches read-all-unread, messages/attachment, /drive/directory, or /drive/file (forbidden endpoints)"
+            ],
+            "acceptance": [
+              "uv run pytest tests/unit/test_dump_sync.py -q is green",
+              "tests skip with a clear reason when docs/api-notes-data/*.json is absent"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "name": "CLI surface",
+      "tasks": [
+        {
+          "id": "T10",
+          "name": "Category extension and per-type summary",
+          "depends_on": ["T9"],
+          "inputs": [
+            "cli.py sync command (_dispatch, _categories_for, summary builder)",
+            "design.md CLI surface (--category {announcements,galleries,messages,documents,all}, default all; summary format)"
+          ],
+          "description": "Modify src/inso_dumper/cli.py: SyncCategory gains messages, documents, and all (replacing both; pre-release rename); default becomes all; _categories_for returns the Category-like dispatch values for the new choices; --force help text documents per-category semantics (post slug / conversation id or dir name / all). Summary builder renders segments only for categories that ran, in the design.md format: 'Synced 12 announcements (3 skipped, 34 photos, 2 videos, 1 attachments), 2 galleries, 3 conversations (41 new messages, 6 attachments), 12 documents for franek in 95.3s.'",
+          "files": {
+            "reuse": [],
+            "create": [],
+            "modify": [
+              "src/inso_dumper/cli.py",
+              "tests/integration/test_cli.py"
+            ],
+            "delete": []
+          },
+          "new_abstractions": [],
+          "validation": {
+            "tests": [
+              "--category messages happy path (fake client: conversations page + message page + attachment bytes) exits 0, summary contains conversation/message/attachment counts, dump/messages/<dir>/ populated",
+              "re-run reports skipped conversations",
+              "--category both is rejected by typer (exit 2)",
+              "default (no --category) runs all four categories",
+              "documents segment appears only when the documents category ran",
+              "forbidden endpoints asserted absent from every recorded fake-client call"
+            ],
+            "acceptance": [
+              "uv run pytest tests/integration/test_cli.py -q is green",
+              "uv run inso-dumper sync --help shows the new choices"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
