@@ -15,7 +15,8 @@ import pytest
 from inso_dumper._result import Err, Ok
 from inso_dumper.dump import sync as sync_module
 from inso_dumper.dump.layout import derive_post_slug
-from inso_dumper.dump.sync import run
+from inso_dumper.dump.manifest import open_manifest
+from inso_dumper.dump.sync import run, run_documents, run_messages
 from inso_dumper.errors import CliError, CliErrorKind
 from inso_dumper.http import timeline as timeline_module
 from inso_dumper.models.children import Child
@@ -319,3 +320,255 @@ def test_child_uuid_used_in_request_paths(tmp_path: Path) -> None:
     for call in client.calls:
         assert "parent-uuid" not in call["path"]
         assert CHILD.child_id in call["path"]
+
+
+# --- run_messages / run_documents (T9) ------------------------------------------
+
+CONV_A_ID = "5b8789d6-4b05-11ed-9234-06f545343a70"
+CONV_B_ID = "6b8789d6-4b05-11ed-9234-06f545343a70"
+
+
+def _conv(id: str, last_update: int = 1787814351, name: str = "Żółta") -> dict[str, Any]:
+    return {
+        "id": id,
+        "lastUpdate": last_update,
+        "recipient": {"name": name, "description": "Wychowawcy", "type": "teachers", "prefix": "Grupa:"},
+        "read": True,
+        "excerpt": "e",
+        "branch": "b",
+        "participantsNames": [],
+    }
+
+
+def _msg(id: str, with_attachment: bool = False) -> dict[str, Any]:
+    attachments: list[Any] | dict[str, Any] = []
+    if with_attachment:
+        attachments = {
+            "media": [
+                {
+                    "name": "IMG_8171.jpeg",
+                    "url": {
+                        "thumb": "https://file.inso.pl/t/1/thumb.jpg?Expires=1",
+                        "full": "https://file.inso.pl/t/1/full.jpg?Expires=1",
+                    },
+                    "isVideo": False,
+                }
+            ],
+            "other": [],
+        }
+    return {
+        "id": id,
+        "message": "hello",
+        "sendDate": "czwartek,  9:05",
+        "sendTimestamp": 1787814351,
+        "sender": {"type": "worker", "name": "A", "initials": "A", "avatar": None},
+        "incoming": True,
+        "attachments": attachments,
+        "main": False,
+        "isRemoved": False,
+        "canRemove": False,
+    }
+
+
+def _conv_page(convs: list[dict[str, Any]]) -> tuple[int, bytes, list[tuple[str, str]]]:
+    body = json.dumps(
+        {"categories": [], "category": "main", "conversations": convs, "templates": [], "unreadCount": 0}
+    ).encode()
+    return (200, body, [])
+
+
+def _msg_page(msgs: list[dict[str, Any]]) -> tuple[int, bytes, list[tuple[str, str]]]:
+    return (200, json.dumps(msgs).encode(), [])
+
+
+def _open_messages_manifest(tmp_path: Path) -> Any:
+    result = open_manifest(tmp_path / "messages" / ".manifest.sqlite")
+    assert isinstance(result, Ok)
+    return result.value
+
+
+def _run_messages(client: FakeHttpClient, tmp_path: Path, **kwargs: Any) -> Ok[Any] | Err[CliError]:
+    return asyncio.run(
+        run_messages(
+            client=client,  # type: ignore[arg-type]
+            session=SESSION,
+            dump_root=tmp_path,
+            log=LOG,
+            **kwargs,
+        )
+    )
+
+
+def test_run_messages_full_first_run(tmp_path: Path) -> None:
+    client = FakeHttpClient(
+        [
+            _conv_page([_conv(CONV_A_ID), _conv(CONV_B_ID)]),
+            _msg_page([_msg("a1")]),
+            _msg_page([]),
+            _msg_page([_msg("b1", with_attachment=True)]),
+            _msg_page([]),
+            (200, b"attachment-bytes", []),
+            _conv_page([]),
+        ]
+    )
+
+    result = _run_messages(client, tmp_path)
+
+    assert isinstance(result, Ok)
+    summary = result.value
+    assert (summary.conversations, summary.messages, summary.message_attachments) == (2, 2, 1)
+
+    messages_dir = tmp_path / "messages"
+    manifest = _open_messages_manifest(tmp_path)
+    try:
+        assert manifest.recorded_conversation(CONV_A_ID) is not None
+        recorded_b = manifest.recorded_conversation(CONV_B_ID)
+        assert recorded_b is not None and recorded_b.message_count == 1
+    finally:
+        manifest.close()
+    conv_b_dir = messages_dir / recorded_b.dir_name
+    assert (conv_b_dir / "conversation.json").is_file()
+    assert (conv_b_dir / "messages.json").is_file()
+    assert (conv_b_dir / "attachments" / "b1" / "1.jpeg").exists()
+    assert len(list((tmp_path / "_common" / "photos").rglob("*.jpeg"))) == 1
+    # forbidden endpoints never requested
+    for call in client.calls:
+        assert "read-all-unread" not in call["path"]
+        assert "messages/attachment" not in call["path"].replace("/system-api/conversations", "")
+        assert not call["path"].startswith(("/drive/directory", "/drive/file"))
+
+
+def test_run_messages_second_run_skips_everything(tmp_path: Path) -> None:
+    page = _conv_page([_conv(CONV_A_ID)])
+    setup = FakeHttpClient([page, _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    first = _run_messages(setup, tmp_path)
+    assert isinstance(first, Ok)
+
+    rerun = FakeHttpClient([page, _conv_page([])])
+    result = _run_messages(rerun, tmp_path)
+
+    assert isinstance(result, Ok)
+    assert (result.value.conversations, result.value.messages) == (0, 0)
+    # only list-page requests: no conversation history was fetched
+    assert all(c["path"].startswith("/system-api/conversations?") for c in rerun.calls)
+
+
+def test_run_messages_tail_fetch_uses_recorded_count(tmp_path: Path) -> None:
+    setup = FakeHttpClient(
+        [
+            _conv_page([_conv(CONV_A_ID)]),
+            _msg_page([_msg("a1")]),
+            _msg_page([]),
+            _conv_page([]),
+        ]
+    )
+    first = _run_messages(setup, tmp_path)
+    assert isinstance(first, Ok)
+
+    # a new message arrives; lastUpdate changes
+    changed = _conv_page([_conv(CONV_A_ID, last_update=1787900751)])
+    tail = FakeHttpClient(
+        [changed, _msg_page([_msg("a2")]), _msg_page([]), _conv_page([])]
+    )
+    result = _run_messages(tail, tmp_path)
+
+    assert isinstance(result, Ok)
+    assert (result.value.conversations, result.value.messages) == (1, 1)
+    assert tail.calls[1]["path"] == (
+        f"/system-api/conversations/{CONV_A_ID}?messages=1&startingIndex=1"
+    )
+    manifest = _open_messages_manifest(tmp_path)
+    try:
+        recorded = manifest.recorded_conversation(CONV_A_ID)
+        assert recorded is not None and recorded.message_count == 2
+        assert recorded.last_update == 1787900751
+    finally:
+        manifest.close()
+    messages_json = json.loads(
+        (tmp_path / "messages" / "2026-08-27-zolta" / "messages.json").read_bytes()
+    )
+    assert [m["id"] for m in messages_json] == ["a1", "a2"]
+
+
+def test_run_messages_tail_fetch_even_when_count_equal(tmp_path: Path) -> None:
+    """A changed last_update with no new messages still tail-fetches; the
+    duplicate id is deduped and nothing is appended."""
+    setup = FakeHttpClient([_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    first = _run_messages(setup, tmp_path)
+    assert isinstance(first, Ok)
+
+    changed = _conv_page([_conv(CONV_A_ID, last_update=1787900751)])
+    rerun = FakeHttpClient([changed, _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    result = _run_messages(rerun, tmp_path)
+
+    assert isinstance(result, Ok)
+    assert (result.value.conversations, result.value.messages) == (1, 0)
+    assert rerun.calls[1]["path"].endswith("startingIndex=1")
+
+
+def test_run_messages_force_refetches_from_zero(tmp_path: Path) -> None:
+    setup = FakeHttpClient([_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    first = _run_messages(setup, tmp_path)
+    assert isinstance(first, Ok)
+
+    changed = _conv_page([_conv(CONV_A_ID, last_update=1787900751)])
+    forced = FakeHttpClient(
+        [changed, _msg_page([_msg("a1"), _msg("a2")]), _msg_page([]), _conv_page([])]
+    )
+    result = _run_messages(forced, tmp_path, force={CONV_A_ID})
+
+    assert isinstance(result, Ok)
+    assert forced.calls[1]["path"].endswith("startingIndex=0")
+    assert result.value.messages == 2
+    messages_json = json.loads(
+        (tmp_path / "messages" / "2026-08-27-zolta" / "messages.json").read_bytes()
+    )
+    assert [m["id"] for m in messages_json] == ["a1", "a2"]
+
+
+def test_run_messages_truncation_fail_safe(tmp_path: Path) -> None:
+    setup = FakeHttpClient(
+        [_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1"), _msg("a2")]), _msg_page([]), _conv_page([])]
+    )
+    first = _run_messages(setup, tmp_path)
+    assert isinstance(first, Ok)
+
+    conv_dir = tmp_path / "messages" / "2026-08-27-zolta"
+    # simulate truncation: 2 recorded, 1 on disk
+    (conv_dir / "messages.json").write_bytes(json.dumps([_msg("a1")]).encode())
+    changed = _conv_page([_conv(CONV_A_ID, last_update=1787900751)])
+    rerun = FakeHttpClient([changed, _msg_page([_msg("a3")]), _msg_page([]), _conv_page([])])
+
+    result = _run_messages(rerun, tmp_path)
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.INTERNAL
+    assert result.error.subject == "messages_history_truncated"
+    messages_json = json.loads((conv_dir / "messages.json").read_bytes())
+    assert [m["id"] for m in messages_json] == ["a1"]  # untouched
+
+
+def test_run_documents_gate_blocks_without_capture(tmp_path: Path) -> None:
+    """The drive download URL is unverified (empty drive at spike time);
+    the gate refuses before any network call (design US-4 warning)."""
+    client = FakeHttpClient([])
+
+    result = asyncio.run(
+        run_documents(client=client, session=SESSION, dump_root=tmp_path, log=LOG)  # type: ignore[arg-type]
+    )
+
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.CONFIG
+    assert result.error.subject == "documents_unverified"
+    assert client.calls == []
+
+
+def test_run_messages_account_level_manifest(tmp_path: Path) -> None:
+    """The conversations manifest lives at dump/messages/.manifest.sqlite
+    (account-level), never under a child slug."""
+    client = FakeHttpClient(
+        [_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])]
+    )
+    result = _run_messages(client, tmp_path)
+    assert isinstance(result, Ok)
+    assert (tmp_path / "messages" / ".manifest.sqlite").is_file()
