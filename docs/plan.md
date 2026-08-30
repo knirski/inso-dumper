@@ -1,89 +1,121 @@
 # Plan: inso-dumper
 
-Companion to [prd](prd.md). Ordered, verifiable steps. Each phase ends with a check.
+Companion to [prd](prd.md) and [api-notes](api-notes.md). Ordered, verifiable
+steps. Each phase ends with a check.
 
-## Phase 0 — API discovery (agent-browser)
+Status markers: ✅ shipped · 🔄 in progress · ⬜ pending. Deviations from the
+original phase intent are noted inline; where a phase grew a spec, the spec is
+the source of truth and this file only tracks status.
 
-1. `agent-browser open https://app.inso.pl/login` → `snapshot -i` to map the login form.
-2. Ask the user to supply credentials via the agent-browser auth vault (password never lands in
-   shell history):
-   ```bash
-   agent-browser auth save inso --url https://app.inso.pl/login \
-     --username <email> --password-stdin
-   agent-browser auth login inso
-   ```
-3. Record traffic while clicking through the app:
-   ```bash
-   agent-browser network har start
-   # visit: announcements board, one announcement with photos, messages, documents, child switcher
-   agent-browser network har stop /tmp/opencode/inso.har
-   ```
-4. Analyze HAR: identify JSON endpoints, auth headers/cookies, pagination params, attachment URL
-   pattern on file.inso.pl.
-5. Re-login test: confirm session persistence (`state save ./auth.json`), note expiry.
+## Phase 0 — API discovery ✅ (superseded by follow-up spikes)
 
-**Deliverable:** `docs/api-notes.md` — endpoint table, auth model, payload examples.
-**Decision point:** JSON API exists → Python httpx client (default).
-API too opaque → fall back to browser-driven scraping (agent-browser in a long-lived session,
-`--session-name inso`), same storage layout.
+Original intent: agent-browser HAR capture to decide between a JSON API client
+and HTML scraping. What was learned (full detail in `api-notes.md`):
 
-## Phase 1 — Skeleton + auth (M1 start)
+- Auth: one-step form POST, `PHPSESSID` HttpOnly cookie, no CSRF.
+- **Hybrid reality**: children/scraping is HTML, but the content surfaces are
+  JSON `system-api` endpoints (`/system-api/timeline/posts`,
+  `/system-api/conversations`, `/drive/items`) — both original branches were
+  half right.
+- Cloudflare passes `httpx` with a browser-like header set (pinned as
+  `BROWSER_LIKE_HEADERS`).
 
-- uv-managed project: `uv init`, `pyproject.toml`, package `inso_dumper`, CLI entry
-  `inso-dumper` (typer); deps added via `uv add httpx typer rich pydantic`; lockfile
-  `uv.lock` committed.
-- **All** Python invocations go through uv: `uv run inso-dumper …`, `uv run pytest`,
-  `uv run ruff check .`. No bare `python`/`pip`.
-- Config loader (TOML + env overrides), session store under `~/.local/state/inso-dumper/`.
-- Implement login against discovered flow; verify with a profile/children listing request.
+Decision point resolved: Python `httpx` client; HTML parsing only for the
+children list. Follow-up spikes (also Aug 2026) captured the timeline,
+conversations, and drive endpoints; captures live in the gitignored
+`docs/api-notes-data/`.
 
-**Check:** `uv run inso-dumper login` prints "OK" and `uv run inso-dumper children` lists real
-children.
+**Deliverable:** `docs/api-notes.md` ✅ (kept current as spikes land).
 
-## Phase 2 — Announcements + photo sets (M1 finish)
+## Phase 1 — Skeleton + auth ✅
 
-- Pydantic models for announcement payloads.
-- Fetch full announcement list (paginate), store meta.json per event dir using naming rules (F3).
-- Download media ordered, checksum, atomic write, hardlink into `_common/blobs/`.
-- Per-event `index.html` gallery.
+Shipped per `docs/specs/2026-08-29-foundation-auth-cli/design.md`: uv project,
+typer CLI, config loader, session store, `login`/`children` commands, exit-code
+taxonomy, `HttpxClient` transport.
 
-**Check:** `uv run inso-dumper sync --only announcements --limit 5 --child <slug>` produces correct
-tree; re-run is a no-op (state db).
+**Check:** met — `login` succeeds, `children` lists real children.
 
-## Phase 3 — Multi-child + dedup (M2)
+## Phase 2 — Announcements + photo sets ✅
 
-- Cross-child announcement-id comparison → `_common/announcements/<id>/` + per-child references.
-- Blob store + hardlink/symlink layer; collision tests; `verify` command.
+Shipped per `docs/specs/2026-08-29-announcements-and-dedup/design.md` (tasks
+T1–T9, PRs #3/#4). Deviations from the original sketch:
 
-**Check:** same photo posted to both children exists exactly once under `_common/blobs/`,
-hardlink count ≥ 2; `uv run inso-dumper verify` clean.
+- JSON timeline API, not HTML parsing; page size 10, `waitingToProcess`
+  backoff.
+- Per-post files are `post.json`/`post.html`/`post.md` (not
+  `meta.json`/`index.html`); gallery `index.html` is deferred to Phase 5.
+- Incremental: full list walk each run + manifest-keyed skip + `--force
+  <slug>` per-post override (no `--full`/`--limit` flags).
 
-## Phase 4 — Messages + documents (M3)
+**Check:** met — first real sync of both children's announcements and
+galleries; markup drift (trailing-slash 301, missing `el-menu` id) and the
+video shape were found and fixed loud, not silently (#5, #6).
 
-- Conversations JSON + attachments; documents tab files (usually PDFs/jadłospisy).
-- Attachments stored under child's `messages/attachments/<conversation-id>/`.
+## Phase 3 — Multi-child + dedup ✅
 
-**Check:** message history byte-identical across two consecutive syncs; PDFs open.
+Shipped with Phase 2 (same spec): content-addressed blob store at
+`_common/{photos,videos,attachments}/`, hardlinks with symlink fallback and
+plain-copy fallback, per-child `.manifest.sqlite` state.
 
-## Phase 5 — Incremental + indexes (M4)
+Deviation: announcement-level dedup (PRD F4.2) resolved as **media-level**
+dedup — the same post dumped to two children gets two post dirs but the blob
+bytes exist once. There is no `_common/announcements/` area. `verify` is
+deferred to Phase 6.
 
-- Pagination until seen-id threshold; `--full` re-verify mode.
-- `_index.json` + top-level `index.html` (filter by child, year, event-name search).
+**Check:** met — re-runs skip recorded posts; media bytes stored once.
 
-**Check:** run `sync` twice in a row → second run 0 downloads; new announcement posted in the app
-appears after next sync.
+## Phase 4 — Messages + documents 🔄
 
-## Phase 6 — Polish (M5)
+Split into two specs:
 
-- `materialize` command, `verify` reporting, error taxonomy, README with privacy notes.
-- Optional: scheduled weekly run via systemd user timer (docs snippet).
+- **Messages** — `docs/specs/2026-08-29-messages-and-documents/plan.json`
+  approved (10 tasks, PR #8 merged). Key discovery: conversations are
+  **account-level** (`?child=` accepted but ignored), so storage is
+  `dump/messages/`, amending the PRD sketch. Manifest schema v3 adds a
+  `conversations` table; tail fetch via `startingIndex`.
+- **Documents** — same spec, but gated: only `breadcrumbs` of the drive API
+  could be verified (empty drive). `sync_documents` fails safe
+  (`documents_unverified`) until a real capture pins the file/download shapes.
+- **Settlements ("Rozliczenia")** — split out entirely: server-rendered HTML +
+  invoice PDFs, not covered by the JSON API. Own follow-up spec (Phase 7).
+
+**Check (messages):** message history byte-identical across two consecutive
+syncs; attachments open.
+**Check (documents):** blocked until the drive download URL is captured from
+the user's real session.
+
+## Phase 5 — Incremental + indexes 🔄
+
+- ✅ Incremental for posts (manifest skip, `--force`), incremental for
+  conversations planned in the messages spec (manifest v3 tail fetch).
+- ⬜ `_index.json` + top-level `index.html` (by date/child/event name).
+- ⬜ Per-event `index.html` gallery (deferred from Phase 2).
+
+**Check:** two consecutive syncs → second run 0 downloads (already true for
+posts); a new announcement/message appears after the next sync.
+
+## Phase 6 — Polish ⬜
+
+- ⬜ `verify` command (checksum recompute, corrupt-blob report).
+- ⬜ `materialize` command (resolve hardlinks/symlinks to copies).
+- ⬜ README with privacy notes; packaging (`uv tool install`).
+
+## Phase 7 — Settlements follow-up spec ⬜
+
+Read-only dump of "Rozliczenia" (`/panel/billing/<child-uuid>/`):
+server-rendered HTML scrape + invoice PDF downloads. Needs its own spike +
+spec; PRD non-goals amended to permit read-only billing access (no writes,
+ever).
 
 ## Risks / mitigations
 
-| Risk | Mitigation |
-| --- | --- |
-| App is SPA with opaque API or heavy obfuscation | Fall back to browser-driven scraping (Phase 0 decision point) |
-| Signed/expiring file URLs | Always re-derive URLs from listings at sync time; never cache bare file URLs |
-| Login captcha/2FA | Interactive `login` step once; long-lived session; manual cookie import as last resort |
-| Marking messages as read as a side effect | Avoid endpoints with side effects; verify with user before any non-GET |
-| Institution switch loses access | Encourage periodic `sync`; dump is local and self-contained |
+| Risk | Status | Mitigation |
+| --- | --- | --- |
+| Opaque API / heavy obfuscation | **resolved** — hybrid HTML + JSON `system-api` | JSON endpoints documented in `api-notes.md` |
+| Signed/expiring file URLs | **resolved** — CloudFront signing confirmed (~hours) | Download immediately after listing; never persist URLs |
+| Cloudflare bot management | **resolved** — browser-like header set passes | `BROWSER_LIKE_HEADERS` pinned, test-asserted; transport swap possible via `HttpClient` Protocol |
+| Login captcha/2FA | none encountered | Re-open only if an account triggers it |
+| Marking content read as a side effect | **mitigated** | Read-only guarantee: `PUT /view`, `read-all-unread`, uploads, and drive writes are never called (test-pinned) |
+| Markup drift (server-rendered parts) | **hit once** — children switcher, 301s (#5) | Parsers fail loud (`PLATFORM_CHANGED`); fix from fresh capture |
+| Institution switch loses access | open | Encourage periodic `sync`; dump is local and self-contained |
+| Manifest schema changes | **hit once** — v3 bump planned | Loud gate (`user_version not in (…)` → error, no silent migration); recovery documented in the spec |

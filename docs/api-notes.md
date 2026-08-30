@@ -1,23 +1,31 @@
 # Inso API notes
 
-Spike output from `plan.md` Phase 0. Captured 2026-08-29 against
-https://app.inso.pl. This document is the **required input** for
-`docs/specs/2026-08-29-foundation-auth-cli/design.md`; the spec's
-assumptions are replaced by what is recorded here.
+Spike output from `plan.md` Phase 0 plus the follow-up spikes for
+`announcements-and-dedup` and `messages-and-documents` (all Aug 2026,
+against https://app.inso.pl). This document is the living record of how
+the platform actually behaves; the specs' assumptions are replaced by
+what is recorded here.
 
 ## TL;DR
 
-The Inso platform is a **server-rendered PHP application** behind
-Cloudflare. There is **no JSON API** for parent-facing content. Auth
-is a one-step form POST that returns a single `HttpOnly PHPSESSID`
-cookie. The children list is **embedded in the HTML of any logged-in
-page** in the sidebar's child-switcher menu. The HTML-scrape path
-in `plan.md` Phase 0 is the correct one.
+The Inso platform is a **server-rendered PHP application behind
+Cloudflare with a JSON `system-api` for content** — a hybrid. Auth is a
+one-step form POST returning a single `HttpOnly PHPSESSID` cookie. The
+children list is scraped from HTML (sidebar), but the content surfaces
+are JSON endpoints discovered in the follow-up spikes:
 
+| Content | Endpoint | Verified |
+| --- | --- | --- |
+| Announcements/galleries | `GET /system-api/timeline/posts` | fully (3 pages + real syncs) |
+| Messages | `GET /system-api/conversations[/{id}]` | fully (list + 2 history pages) |
+| Documents (drive) | `GET /drive/items[/{directoryId}]` | `breadcrumbs` only (empty drive) |
+
+The original "no JSON API" conclusion from the login spike applied only
+to the pages the first spike visited; see the endpoint sections below.
 Cloudflare blocks bare HTTP clients, but **passes `httpx` with a
 realistic browser header set** — confirmed in the spike and a
-follow-up probe on 2026-08-29. See *Cloudflare bot management* below.
-The `HttpxClient` production transport sends a fixed
+follow-up probe. See *Cloudflare bot management* below. The
+`HttpxClient` production transport sends a fixed
 `BROWSER_LIKE_HEADERS` constant on every request.
 
 ## Auth model
@@ -198,31 +206,131 @@ dashboard):
    drift), matching anchors without names → `Ok([])`.
 
 
+## Timeline posts API (JSON, discovered in the announcements spike)
+
+Captured page: `docs/api-notes-data/timeline-posts-page3-category2.json`
+(gitignored — real names inside).
+
+```
+GET /system-api/timeline/posts?page={1,2,...}&categoryId={0,1,2,3,4,6,99}&child={child-uuid}
+→ 200 application/json: {"items": [Post, ...], "waitingToProcess": 0}
+```
+
+- Page size **10**; a page with fewer items is the last one (we walk until
+  an empty `items` page).
+- `waitingToProcess > 0` means a server-side write is queued and the page
+  may be incomplete — the client retries with exponential backoff
+  (cap 30 s, 3 attempts) before treating the page as settled.
+- Categories: 0 Wszystkie, 1 Wydarzenia, **2 Ogłoszenia**, **3 Galerie
+  zdjęć**, 4 Jadłospisy, 6 Ankiety, 99 Archiwum (from `data-categories`
+  on `#root`).
+- Auth: `Cookie: PHPSESSID=…` only; no CSRF, no bearer.
+- `?child=` filters per child; `?categoryId=` filters per tab.
+
+`Post` payload (verbatim field names; validated against captures):
+
+```json
+{
+  "id": "3d5b38b4-…", "title": "…", "content": "<p>…sanitised HTML…</p>",
+  "media": {
+    "photos": [{"type": "photo", "name": "IMG_2679.jpeg",
+                "src": {"thumb": "https://file.inso.pl/…", "full": "https://file.inso.pl/…"}}],
+    "videos": [],
+    "attachments": [{"name": "pozegnanie-z-dzieckiem.pdf", "url": "https://file.inso.pl/…"}]
+  },
+  "createdAt": 1787811431, "createdAtText": "czwartek,  8:17",
+  "visibleFor": ["Żółta", "Zielona"], "visibleForChildren": ["eea48660-…"],
+  "author": "Lipińska Agnieszka", "likes": 1,
+  "commentsAvailable": false, "comments": 0,
+  "sticky": false, "archived": false
+}
+```
+
+Ignored fields: `actions`, `userVoted`, `likesText`, `commentsText`,
+`isWorker*`, `displayed`, `poll`, `translations`. **Comment bodies are
+not in the payload** — counts only.
+
+- **Videos ride inside `media.photos[]`** with `"type": "video"` and
+  `src: {mp4, thumb}` (no `full`); the dedicated `media.videos` array
+  has been empty on every captured post. Details and the captured shape
+  are in *Timeline media: video item shape* at the bottom of this file.
+- **`PUT /view` is intentionally never called** (the browser fires it on
+  every page load; the dumper does not — read-only guarantee).
+- Signed media URLs:
+  `https://file.inso.pl/timeline/{institution}/{y}/{m}/{uuid}/{file}?Expires=…&Signature=…&Key-Pair-Id=…`
+  — CloudFront, short-lived (~hours). Download immediately; never persist.
+
+## Conversations API (JSON, discovered in the messages spike)
+
+Captures: `conversations-sample.json`, `conversation-detail-sample.json`.
+
+```
+GET /system-api/conversations?category=main[&loadOlder=1]
+→ {"categories": [], "category": "main", "conversations": [...],
+   "templates": [], "unreadCount": int}
+
+GET /system-api/conversations/{id}?messages=1[&startingIndex=N]
+→ [Message, ...]                    # bare list; 30 per page
+```
+
+- **Account-level**: `?child=` is accepted but ignored; conversations are
+  group-teacher threads (`recipient.type: "teachers"`). Storage and
+  manifests are therefore account-level, not per-child.
+- History pages: `startingIndex=30` returns the next 30 messages
+  (verified); the list is a bare JSON array, no envelope.
+- Conversation item: `{id, lastUpdate (unix), recipient: {name,
+  description, type, prefix}, read, branch, participantsNames, excerpt}`.
+- Message item: `{id, message, sendDate, sendTimestamp, sender: {type,
+  name, initials, avatar}, incoming, attachments: {media: [], other: []},
+  main, isRemoved, canRemove}`.
+- Media attachment: `{name, url: {thumb, full}, isVideo}` — a dict, unlike
+  the timeline's flat attachment URL. `attachments.other` shape is
+  **unverified** (none captured); parsed permissively until a capture.
+- Conversations **mutate** (unlike posts): re-sync compares `lastUpdate`
+  and tail-fetches via `startingIndex = message_count`. Old-message
+  edits/removals are only caught by a full re-fetch.
+- Forbidden (never called): `POST /system-api/conversations/read-all-unread`,
+  `POST /system-api/messages/attachment`.
+
+## Drive API (JSON, provisional — messages spike)
+
+Capture: `drive-items-sample.json`. The spike account's drive is empty,
+so only `breadcrumbs` is verified:
+
+```
+GET /drive/items[/{directoryId}]
+→ {"breadcrumbs": [{"name", "id"}], "directories": [...], "directory": ..., "files": [...]}
+```
+
+The `directories`/`files` node shapes are **provisional**; the first
+non-empty drive either parses or fails loud and the models are fixed from
+a fresh capture (same path as the video-shape fix). Until then
+`sync_documents` refuses to guess
+(`Err(CONFIG, 'documents_unverified')`). File download URLs are expected
+to be CloudFront-signed like the rest of `file.inso.pl` — **unverified**.
+Forbidden (never called): all `/drive/directory*` and `/drive/file*`
+write endpoints.
+
 ## Other endpoints discovered (out of scope for v1)
 
-These URLs appeared in the sidebar's navigation links and are
-recorded here so the follow-up specs (`announcements-and-dedup`,
-`messages-and-documents`) can target them without re-running the
-spike. The spike did not capture their bodies; that is the
-respective follow-up spec's job.
+These URLs appeared in the sidebar's navigation links. The JSON-backed
+ones are covered by the sections above; the rest are server-rendered
+HTML pages (not yet spiked) — the settlements follow-up spec targets
+Rozliczenia (read-only).
 
 | Section | URL pattern | What it shows |
 | --- | --- | --- |
-| Dashboard (Podsumowanie) | `/panel/home/<child-uuid>/` | Today's summary; sidebar |
-| Messages (Wiadomości) | `/messages?child=<child-uuid>` | Conversations list |
-| Announcements (Ogłoszenia) | `/timeline/child/<child-uuid>` | Announcements feed |
-| Billing (Rozliczenia) | `/panel/billing/<child-uuid>/` | Fees — **out of scope per PRD Non-goals** |
+| Dashboard (Podsumowanie) | `/panel/home/<child-uuid>/` | Today's summary; sidebar; children scrape |
+| Messages (Wiadomości) | `/messages?child=<child-uuid>` | HTML shell for the conversations JSON API |
+| Announcements (Ogłoszenia) | `/timeline/child/<child-uuid>` | HTML shell for the timeline JSON API |
+| Billing (Rozliczenia) | `/panel/billing/<child-uuid>/` | Fees + invoices — read-only dump planned (M6) |
 | Attendance calendar | `/panel/attendance/<child-uuid>/` | Calendar |
 | Events | `/events/child/<child-uuid>` | Events list |
-| Files (Pliki) | `/panel/files/<child-uuid>/` | Documents / file library |
+| Files (Pliki) | `/panel/files/<child-uuid>/` | HTML shell for the drive JSON API |
 | Diaries (Dzienniki) | `/diaries/child/<child-uuid>` | Daily reports |
 | Child data | `/panel/child-data/<child-uuid>/` | Profile, parents, pickup |
 | Authorizations | `/panel/authorizations/<child-uuid>/` | Pickup authorizations |
 | Add child | `/panel/add-child` | New child wizard (skip) |
-
-All of these are also server-rendered HTML, with the same sidebar.
-The spike did not check for any JSON endpoint behind them; the
-follow-up spike for `announcements-and-dedup` should.
 
 ## Session model (spec revision)
 
@@ -247,16 +355,21 @@ fields in the spec's draft are **not needed** for v1. Drop them. The
 plus `remember_me: str | None` for forward compat, but v1 only needs
 `phpsessid`.
 
-## Open Questions (still open after this spike)
+## Open Questions (still open after all spikes)
 
 1. **Session lifetime** — not measured. The `expires_at` field in
    the persisted session is currently always `None` and treated as
    "validate on every load" (i.e. re-login required every run).
-   The follow-up announcement spec can measure the real value.
-2. **2FA on this account** — none encountered. The spike logged in
-   cleanly. If a future account has 2FA, the foundation is
-   unprepared: the `login` command's error taxonomy has no
+2. **2FA on this account** — none encountered. If a future account has
+   2FA, the `login` command's error taxonomy has no
    `NEEDS_2FA` variant. **Defer to that account.**
+3. **Drive file/download shapes** — the account drive is empty;
+   `directories`/`files` shapes and the download URL scheme are
+   provisional (see § Drive API).
+4. **Message `attachments.other`** — never captured; parsed permissively.
+5. **`loadOlder` semantics on `/system-api/conversations`** — the exact
+   paging contract is assumption-level; the planned walker stops on an
+   empty/no-progress page rather than assuming a page size.
 
 ## How to reproduce this spike
 
