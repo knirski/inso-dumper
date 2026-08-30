@@ -5,10 +5,11 @@ Authenticates against a parent account and dumps announcements, messages, and
 documents available to that parent, with deduplication into a shared area.
 
 This ships the **foundation** (M1), **announcements-and-dedup** (M1 finish +
-M2), and **messages-and-documents** (M3: communicator + drive) specs:
-`inso-dumper login`, `children`, and `sync` for announcements, galleries,
-messages, and documents. Indexes and the `verify`/`materialize`
-sub-commands land in follow-up specs.
+M2), **messages-and-documents** (M3: communicator + drive), **settlements**
+(M6), and **indexes + integrity audit** (Phase 5/6) specs: `inso-dumper
+login`, `children`, `sync` (announcements, galleries, messages, settlements),
+`index`, `verify`, and `materialize`. Documents remain gated on a real
+drive capture (see below).
 
 ## Quick start
 
@@ -83,6 +84,13 @@ the recovery is `--force`.
 top-level `index.html`, and a per-event gallery `index.html` from the
 dump tree — so "find photos from Dzień Kolorowy 2025" is a click away.
 
+`inso-dumper verify` (offline) re-hashes every `_common/` blob against
+its content-addressed filename and resolves every symlink; it exits 0
+when the dump is clean and 1 with a findings report (corrupt blobs,
+dangling links). `inso-dumper materialize` (offline) replaces symlinks
+with real copies so the per-child tree is self-contained; `_common/`
+is kept — future syncs still dedup against it. Both are safe to re-run.
+
 **Documents gate:** the drive file-download shape could not be verified
 during discovery (empty drive), so the documents category is a loud
 skip until a non-empty drive capture pins it — it never guesses.
@@ -90,6 +98,19 @@ skip until a non-empty drive capture pins it — it never guesses.
 The dumper is read-only against the platform: GET requests only, signed
 media URLs are never persisted, and mark-as-read/upload endpoints are
 never called.
+
+## Privacy
+
+The dump contains children's personal data (names, photos, messages,
+billing). Treat the whole tree as sensitive:
+
+- Directories are created `0700` and files `0600`; never commit `dump/`
+  or anything derived from it.
+- The `PHPSESSID` session file grants full account access — it lives
+  outside the repo (`~/.local/state/inso-dumper/`) and never enters
+  logs (tokens are redacted).
+- If you share excerpts of a dump (bug reports, screenshots), redact
+  names, faces, and message text first.
 
 ## Environment variables
 
@@ -122,6 +143,7 @@ on expiry.
 | Code | Meaning |
 | ---: | --- |
 | 0 | Success |
+| 1 | `verify` found integrity issues (corrupt blobs / dangling links) |
 | 2 | Configuration / env error |
 | 3 | Authentication failed |
 | 4 | Saved session expired or missing — run `inso-dumper login` |

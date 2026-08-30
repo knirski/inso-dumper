@@ -135,11 +135,13 @@ inso-dumper children         # list children + slugs                            
 inso-dumper sync <child-slug> [--category announcements|galleries|both]            [shipped]
                              #   messages/documents/all land with the M3 spec
 inso-dumper index            # rebuild _index.json + index.html pages (offline)     [shipped]
-inso-dumper verify           # recompute checksums, report missing/corrupt blobs    [Phase 6]
-inso-dumper materialize      # replace hardlinks/symlinks with real copies          [Phase 6]
+inso-dumper verify           # recompute checksums, report missing/corrupt blobs    [shipped]
+inso-dumper materialize      # replace symlinks with real copies (_common kept)     [shipped]
 ```
 Options: `--config`, `--dump-root`, `--force <slug>` (repeatable), `-v/--verbose`.
 `--limit` (testing aid) is not implemented; `--full` was replaced by the per-slug `--force`.
+`verify` exits 0 clean and 1 with findings (scriptable audit; the closed
+`CliError` exit-code family is untouched).
 
 ### F7. Human-friendly output
 - Per-post `post.html` + `post.md` (shipped); per-event `index.html` photo gallery and the
