@@ -332,7 +332,12 @@ def _conv(id: str, last_update: int = 1787814351, name: str = "Żółta") -> dic
     return {
         "id": id,
         "lastUpdate": last_update,
-        "recipient": {"name": name, "description": "Wychowawcy", "type": "teachers", "prefix": "Grupa:"},
+        "recipient": {
+            "name": name,
+            "description": "Wychowawcy",
+            "type": "teachers",
+            "prefix": "Grupa:",
+        },
         "read": True,
         "excerpt": "e",
         "branch": "b",
@@ -372,7 +377,13 @@ def _msg(id: str, with_attachment: bool = False) -> dict[str, Any]:
 
 def _conv_page(convs: list[dict[str, Any]]) -> tuple[int, bytes, list[tuple[str, str]]]:
     body = json.dumps(
-        {"categories": [], "category": "main", "conversations": convs, "templates": [], "unreadCount": 0}
+        {
+            "categories": [],
+            "category": "main",
+            "conversations": convs,
+            "templates": [],
+            "unreadCount": 0,
+        }
     ).encode()
     return (200, body, [])
 
@@ -467,9 +478,7 @@ def test_run_messages_tail_fetch_uses_recorded_count(tmp_path: Path) -> None:
 
     # a new message arrives; lastUpdate changes
     changed = _conv_page([_conv(CONV_A_ID, last_update=1787900751)])
-    tail = FakeHttpClient(
-        [changed, _msg_page([_msg("a2")]), _msg_page([]), _conv_page([])]
-    )
+    tail = FakeHttpClient([changed, _msg_page([_msg("a2")]), _msg_page([]), _conv_page([])])
     result = _run_messages(tail, tmp_path)
 
     assert isinstance(result, Ok)
@@ -493,7 +502,9 @@ def test_run_messages_tail_fetch_uses_recorded_count(tmp_path: Path) -> None:
 def test_run_messages_tail_fetch_even_when_count_equal(tmp_path: Path) -> None:
     """A changed last_update with no new messages still tail-fetches; the
     duplicate id is deduped and nothing is appended."""
-    setup = FakeHttpClient([_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    setup = FakeHttpClient(
+        [_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])]
+    )
     first = _run_messages(setup, tmp_path)
     assert isinstance(first, Ok)
 
@@ -507,7 +518,9 @@ def test_run_messages_tail_fetch_even_when_count_equal(tmp_path: Path) -> None:
 
 
 def test_run_messages_force_refetches_from_zero(tmp_path: Path) -> None:
-    setup = FakeHttpClient([_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])])
+    setup = FakeHttpClient(
+        [_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1")]), _msg_page([]), _conv_page([])]
+    )
     first = _run_messages(setup, tmp_path)
     assert isinstance(first, Ok)
 
@@ -528,7 +541,12 @@ def test_run_messages_force_refetches_from_zero(tmp_path: Path) -> None:
 
 def test_run_messages_truncation_fail_safe(tmp_path: Path) -> None:
     setup = FakeHttpClient(
-        [_conv_page([_conv(CONV_A_ID)]), _msg_page([_msg("a1"), _msg("a2")]), _msg_page([]), _conv_page([])]
+        [
+            _conv_page([_conv(CONV_A_ID)]),
+            _msg_page([_msg("a1"), _msg("a2")]),
+            _msg_page([]),
+            _conv_page([]),
+        ]
     )
     first = _run_messages(setup, tmp_path)
     assert isinstance(first, Ok)
@@ -572,3 +590,215 @@ def test_run_messages_account_level_manifest(tmp_path: Path) -> None:
     result = _run_messages(client, tmp_path)
     assert isinstance(result, Ok)
     assert (tmp_path / "messages" / ".manifest.sqlite").is_file()
+
+
+# --- run_settlements (T6) ----------------------------------------------------
+
+from inso_dumper.config import Config  # noqa: E402
+from inso_dumper.dump.sync import run_settlements  # noqa: E402
+
+SETTLEMENTS_FIXTURE = Path("tests/unit/fixtures/settlements-history-small.html")
+
+
+def _history_html() -> tuple[int, bytes, list[tuple[str, str]]]:
+    return (200, SETTLEMENTS_FIXTURE.read_bytes(), [])
+
+
+def _invoice(status: int = 200) -> tuple[int, bytes, list[tuple[str, str]]]:
+    return (status, b"%PDF-1.4 fake-invoice", [("Content-Type", "application/pdf")])
+
+
+def test_run_settlements_happy_path(tmp_path: Path) -> None:
+    client = FakeHttpClient([_history_html(), _invoice()])
+    result = asyncio.run(
+        run_settlements(
+            client=client,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Ok)
+    summary = result.value
+    assert summary.settlements == 2
+    assert summary.settlements_invoices == 1
+    assert summary.settlements_skipped == 0
+    month_dir = tmp_path / CHILD.slug / "settlements" / "2026-08"
+    assert (month_dir / "settlement.json").is_file()
+    assert (month_dir / "invoice.pdf").read_bytes() == b"%PDF-1.4 fake-invoice"
+    other = tmp_path / CHILD.slug / "settlements" / "2026-07"
+    assert (other / "settlement.json").is_file()
+    assert not (other / "invoice.pdf").exists()
+    assert [c["path"] for c in client.calls] == [
+        "/panel/child/0123abcd-1111-2222-3333-444455556666/settlement",
+        "/panel/settlement/0b5b2e76-6473-4166-8fed-d864e8845a81/invoice",
+    ]
+
+
+def test_run_settlements_second_run_skips_invoice_download(tmp_path: Path) -> None:
+    setup = FakeHttpClient([_history_html(), _invoice()])
+    assert isinstance(
+        asyncio.run(
+            run_settlements(
+                client=setup,
+                config=Config(),
+                session=SESSION,
+                child=CHILD,
+                dump_root=tmp_path,
+                log=LOG,
+            )
+        ),
+        Ok,
+    )
+    rerun = FakeHttpClient([_history_html()])
+    result = asyncio.run(
+        run_settlements(
+            client=rerun,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Ok)
+    assert result.value.settlements == 2
+    assert result.value.settlements_invoices == 0
+    assert result.value.settlements_skipped == 1
+    assert (
+        tmp_path / CHILD.slug / "settlements" / "2026-08" / "invoice.pdf"
+    ).read_bytes() == b"%PDF-1.4 fake-invoice"
+
+
+def test_run_settlements_manifest_row_without_file_redownloads(tmp_path: Path) -> None:
+    setup = FakeHttpClient([_history_html(), _invoice()])
+    assert isinstance(
+        asyncio.run(
+            run_settlements(
+                client=setup,
+                config=Config(),
+                session=SESSION,
+                child=CHILD,
+                dump_root=tmp_path,
+                log=LOG,
+            )
+        ),
+        Ok,
+    )
+    invoice = tmp_path / CHILD.slug / "settlements" / "2026-08" / "invoice.pdf"
+    invoice.unlink()
+
+    redownload = FakeHttpClient([_history_html(), _invoice()])
+    result = asyncio.run(
+        run_settlements(
+            client=redownload,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Ok)
+    assert result.value.settlements_invoices == 1
+    assert result.value.settlements_skipped == 0
+    assert invoice.is_file()
+
+
+def test_run_settlements_force_redownloads_only_forced_month(tmp_path: Path) -> None:
+    setup = FakeHttpClient([_history_html(), _invoice()])
+    assert isinstance(
+        asyncio.run(
+            run_settlements(
+                client=setup,
+                config=Config(),
+                session=SESSION,
+                child=CHILD,
+                dump_root=tmp_path,
+                log=LOG,
+            )
+        ),
+        Ok,
+    )
+    forced = FakeHttpClient(
+        [_history_html(), (200, b"%PDF-forced", [("Content-Type", "application/pdf")])]
+    )
+    result = asyncio.run(
+        run_settlements(
+            client=forced,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            force={"2026-08"},
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Ok)
+    assert result.value.settlements_invoices == 1
+    assert result.value.settlements_skipped == 0
+    invoice = tmp_path / CHILD.slug / "settlements" / "2026-08" / "invoice.pdf"
+    assert invoice.read_bytes() == b"%PDF-forced"
+
+
+def test_run_settlements_drift_short_circuits_fail_loud(tmp_path: Path) -> None:
+    client = FakeHttpClient(
+        [Err(CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="settlements_money"))]
+    )
+    result = asyncio.run(
+        run_settlements(
+            client=client,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Err)
+    assert result.error.subject == "settlements_money"
+    settlements_root = tmp_path / CHILD.slug / "settlements"
+    if settlements_root.exists():
+        assert not [p for p in settlements_root.iterdir() if p.name != ".manifest.sqlite"]
+
+
+def test_run_settlements_invoice_404_short_circuits(tmp_path: Path) -> None:
+    client = FakeHttpClient([_history_html(), (404, b"", [])])
+    result = asyncio.run(
+        run_settlements(
+            client=client,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Err)
+    assert result.error.kind is CliErrorKind.HTTP
+    assert result.error.subject == "invoice_status_404"
+
+
+def test_run_settlements_leaves_v3_manifests_alone(tmp_path: Path) -> None:
+    announcements = tmp_path / CHILD.slug / "announcements"
+    announcements.mkdir(parents=True)
+    v3 = announcements / ".manifest.sqlite"
+    v3.write_bytes(b"pretend-v3-bytes")
+    before = v3.read_bytes()
+
+    client = FakeHttpClient([_history_html(), _invoice()])
+    result = asyncio.run(
+        run_settlements(
+            client=client,
+            config=Config(),
+            session=SESSION,
+            child=CHILD,
+            dump_root=tmp_path,
+            log=LOG,
+        )
+    )
+    assert isinstance(result, Ok)
+    assert v3.read_bytes() == before
+    assert (tmp_path / CHILD.slug / "settlements" / ".manifest.sqlite").is_file()

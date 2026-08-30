@@ -34,7 +34,12 @@ from rich.table import Table
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import load_config
-from inso_dumper.dump.sync import SyncSummary, run_documents, run_messages
+from inso_dumper.dump.sync import (
+    SyncSummary,
+    run_documents,
+    run_messages,
+    run_settlements,
+)
 from inso_dumper.dump.sync import run as sync_run
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
@@ -229,33 +234,43 @@ class SyncCategory(StrEnum):
     GALLERIES = "galleries"
     MESSAGES = "messages"
     DOCUMENTS = "documents"
+    SETTLEMENTS = "settlements"
     ALL = "all"
 
 
 @dataclass(frozen=True, slots=True)
 class _CategoryPlan:
-    """What one ``--category`` choice expands to. Posts categories are
-    per child; messages and documents are account-level and run exactly
-    once per invocation regardless of the child argument."""
+    """What one ``--category`` choice expands to. Posts categories and
+    settlements are per child; messages and documents are account-level
+    and run exactly once per invocation regardless of the child
+    argument."""
 
     posts: list[Category]
     messages: bool
     documents: bool
+    settlements: bool = False
 
 
 def _plan_for(choice: SyncCategory) -> _CategoryPlan:
     match choice:
         case SyncCategory.ANNOUNCEMENTS:
-            return _CategoryPlan([Category.ANNOUNCEMENTS], messages=False, documents=False)
+            return _CategoryPlan(
+                [Category.ANNOUNCEMENTS], messages=False, documents=False
+            )
         case SyncCategory.GALLERIES:
             return _CategoryPlan([Category.GALLERIES], messages=False, documents=False)
         case SyncCategory.MESSAGES:
             return _CategoryPlan([], messages=True, documents=False)
         case SyncCategory.DOCUMENTS:
             return _CategoryPlan([], messages=False, documents=True)
+        case SyncCategory.SETTLEMENTS:
+            return _CategoryPlan([], messages=False, documents=False, settlements=True)
         case SyncCategory.ALL:
             return _CategoryPlan(
-                [Category.ANNOUNCEMENTS, Category.GALLERIES], messages=True, documents=True
+                [Category.ANNOUNCEMENTS, Category.GALLERIES],
+                messages=True,
+                documents=True,
+                settlements=True,
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -269,10 +284,17 @@ class _SyncTotals:
     galleries: SyncSummary | None = None
     messages: SyncSummary | None = None
     documents: SyncSummary | None = None
+    settlements: SyncSummary | None = None
 
     @property
     def seconds(self) -> float:
-        parts = (self.announcements, self.galleries, self.messages, self.documents)
+        parts = (
+            self.announcements,
+            self.galleries,
+            self.messages,
+            self.documents,
+            self.settlements,
+        )
         return sum(s.seconds for s in parts if s is not None)
 
     def with_segment(self, name: str, summary: SyncSummary) -> _SyncTotals:
@@ -302,7 +324,17 @@ def _summary_line(totals: _SyncTotals, child_slug: str) -> str:
         )
     if totals.documents is not None:
         segments.append(f"{totals.documents.documents} documents")
-    who = child_slug if (totals.announcements or totals.galleries) else "the account"
+    if totals.settlements is not None:
+        s = totals.settlements
+        segments.append(
+            f"{s.settlements} settlements ({s.settlements_skipped} skipped, "
+            f"{s.settlements_invoices} invoices)"
+        )
+    who = (
+        child_slug
+        if (totals.announcements or totals.galleries or totals.settlements)
+        else "the account"
+    )
     return f"Synced {', '.join(segments)} for {who} in {totals.seconds:.1f}s."
 
 
@@ -323,7 +355,10 @@ def sync(
     category: SyncCategory = typer.Option(
         SyncCategory.ALL,
         "--category",
-        help="Which categories to sync: announcements, galleries, messages, documents, or all.",
+        help=(
+            "Which categories to sync: announcements, galleries, messages, "
+            "documents, settlements, or all."
+        ),
     ),
     dump_root: Path = typer.Option(
         Path("dump"), "--dump-root", help="Dump output directory (created if missing)."
@@ -333,7 +368,8 @@ def sync(
         "--force",
         help=(
             "Re-dump even if recorded; repeatable. Posts: slug. Messages: conversation id "
-            "or dir name (refetches history from 0). Documents: re-walk."
+            "or dir name (refetches history from 0). Documents: re-walk. "
+            "Settlements: YYYY-MM month key (re-downloads that month's invoice)."
         ),
     ),
     config_path: Path | None = typer.Option(
@@ -365,10 +401,12 @@ def sync(
         cfg = cfg_result.value
         plan = _plan_for(category)
         totals = _SyncTotals()
+        child: Child | None = None
         async with HttpxClient(cfg) as client:
-            if plan.posts:
+            # Settlements are per child too, so the child must resolve
+            # whenever either per-child kind is planned.
+            if plan.posts or plan.settlements:
                 kids_result = await list_children_shell(client, cfg, session)
-                child: Child | None = None
                 match kids_result:
                     case Err(error):
                         return Err(error)
@@ -377,8 +415,12 @@ def sync(
                         child = next((k for k in kids if k.slug == child_slug), None)
                 if child is None:
                     return Err(
-                        CliError(kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug")
+                        CliError(
+                            kind=CliErrorKind.PLATFORM_CHANGED, subject="unknown_child_slug"
+                        )
                     )
+            if plan.posts:
+                assert child is not None  # per-child posts ⇒ resolved above
                 for cat in plan.posts:
                     run_result = await sync_run(
                         client=client,
@@ -393,7 +435,9 @@ def sync(
                         case Err(error):
                             return Err(error)
                         case Ok(s):
-                            segment = "announcements" if cat is Category.ANNOUNCEMENTS else "galleries"
+                            segment = (
+                                "announcements" if cat is Category.ANNOUNCEMENTS else "galleries"
+                            )
                             totals = totals.with_segment(segment, s)
             if plan.messages:
                 run_result = await run_messages(
@@ -426,6 +470,25 @@ def sync(
                         return Err(error)
                     case Ok(s):
                         totals = totals.with_segment("documents", s)
+            if plan.settlements:
+                # Per child; ``child`` resolved above when either
+                # per-child kind is planned. Runs last so the
+                # account-level walk order is unchanged.
+                assert child is not None  # plan.settlements ⇒ resolved above
+                run_result = await run_settlements(
+                    client=client,
+                    config=cfg,
+                    session=session,
+                    child=child,
+                    dump_root=root,
+                    force=set(force) if force else set(),
+                    log=log,
+                )
+                match run_result:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(s):
+                        totals = totals.with_segment("settlements", s)
         return Ok(totals)
 
     result = _dispatch(_do_sync, log)

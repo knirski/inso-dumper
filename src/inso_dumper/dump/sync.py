@@ -22,14 +22,20 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from inso_dumper._result import Err, Ok
+from inso_dumper.config import Config
 from inso_dumper.dump.layout import derive_post_slug, sha256_hex
-from inso_dumper.dump.manifest import Manifest, open_manifest
+from inso_dumper.dump.manifest import (
+    Manifest,
+    SettlementManifest,
+    open_manifest,
+    open_settlements_manifest,
+)
 from inso_dumper.dump.messages import (
     append_messages,
     link_message_attachment,
@@ -37,6 +43,7 @@ from inso_dumper.dump.messages import (
     write_conversation,
     write_conversation_payload,
 )
+from inso_dumper.dump.settlements import invoice_path, write_invoice, write_settlement_month
 from inso_dumper.dump.writer import (
     ensure_private_dir,
     link_media_to_post,
@@ -47,11 +54,12 @@ from inso_dumper.dump.writer import (
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.client import HttpClient
 from inso_dumper.http.messages import fetch_messages, list_conversations
+from inso_dumper.http.settlements import fetch_invoice, fetch_settlements_history
 from inso_dumper.http.timeline import MediaItemKind, download_media, list_posts
 from inso_dumper.models.children import Child
-from inso_dumper.models.messages import Conversation, Message
+from inso_dumper.models.messages import Message
 from inso_dumper.models.session import Session
-from inso_dumper.models.timeline import Category, Post, ext_from
+from inso_dumper.models.timeline import Category, ext_from
 
 log = logging.getLogger("inso_dumper.dump.sync")
 
@@ -73,6 +81,9 @@ class SyncSummary:
     messages: int = 0
     message_attachments: int = 0
     documents: int = 0
+    settlements: int = 0
+    settlements_skipped: int = 0
+    settlements_invoices: int = 0
 
 
 async def run(
@@ -300,7 +311,11 @@ async def run_messages(
             is_forced = conversation.id in forced or (
                 recorded is not None and recorded.dir_name in forced
             )
-            if recorded is not None and recorded.last_update == conversation.last_update and not is_forced:
+            if (
+                recorded is not None
+                and recorded.last_update == conversation.last_update
+                and not is_forced
+            ):
                 log.info("skipping conversation %s (unchanged)", conversation.id)
                 continue
             # dir_record keeps the once-assigned directory binding across a
@@ -395,6 +410,140 @@ async def run_messages(
     )
 
 
+async def run_settlements(
+    *,
+    client: HttpClient,
+    config: Config,
+    session: Session,
+    child: Child,
+    dump_root: Path,
+    force: set[str] | frozenset[str] | None = None,
+    log: logging.Logger = log,
+) -> CliResult[SyncSummary]:
+    """Sync one child's settlement history into ``dump_root``.
+
+    Per-child (the history URL is per child, unlike the account-level
+    messages/documents walks): manifest at
+    ``dump_root/<child-slug>/settlements/.manifest.sqlite`` (schema
+    v4). Every run re-scrapes the history page (one GET) and rewrites
+    each ``settlement.json`` idempotently; an invoice is downloaded
+    only when the manifest row lacks ``invoice_downloaded_at`` or the
+    file is absent (or the month is forced — the row is cleared first).
+    ``force`` holds ``YYYY-MM`` keys. Every inner ``Err`` short-circuits
+    and is returned unchanged; nothing here raises.
+    """
+    start = time.monotonic()
+    forced = force or frozenset()
+    settlements_root = dump_root / child.slug / "settlements"
+    # Create and enforce each level so the whole chain is 0o700.
+    for level in (dump_root, dump_root / child.slug, settlements_root):
+        ensure_private_dir(level)
+    manifest_result = open_settlements_manifest(settlements_root / ".manifest.sqlite")
+    manifest: SettlementManifest | None
+    match manifest_result:
+        case Err(error):
+            return Err(error)
+        case Ok(value):
+            manifest = value
+
+    months = invoices = skipped = 0
+    try:
+        async for item in fetch_settlements_history(client, config, session, child.child_id):
+            match item:
+                case Err(error):
+                    return Err(error)
+                case Ok(page):
+                    pass
+
+            for month in page.months:
+                month_dir = settlements_root / month.month
+                written = write_settlement_month(month, month_dir)
+                match written:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(_):
+                        pass
+
+                recorded = manifest.recorded_settlement(month.month)
+                if month.month in forced:
+                    # Drop the stale row first so an interrupted forced
+                    # re-download cannot be mistaken for a complete one.
+                    cleared = manifest.force_clear_settlements(month.month)
+                    match cleared:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(_):
+                            pass
+                    recorded = None
+
+                if month.invoice_bill_uuid is None:
+                    if recorded is None:
+                        # Record first-seen for invoice-less months; a
+                        # row that already carries download history is
+                        # never erased by a link-less card.
+                        upserted = manifest.upsert_settlement(month.month, None, None)
+                        match upserted:
+                            case Err(error):
+                                return Err(error)
+                            case Ok(_):
+                                pass
+                    months += 1
+                    continue
+
+                need_invoice = recorded is None or (
+                    recorded.invoice_downloaded_at is None or not invoice_path(month_dir).exists()
+                )
+                if need_invoice:
+                    fetched = await fetch_invoice(client, config, session, month.invoice_bill_uuid)
+                    match fetched:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(data):
+                            pass
+                    saved = write_invoice(data, month_dir)
+                    match saved:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(_):
+                            pass
+                    upserted = manifest.upsert_settlement(
+                        month.month, month.invoice_bill_uuid, datetime.now(UTC).isoformat()
+                    )
+                    match upserted:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(_):
+                            pass
+                    invoices += 1
+                else:
+                    # Refresh the bill uuid but keep the download stamp.
+                    assert recorded is not None  # need_invoice False implies this
+                    upserted = manifest.upsert_settlement(
+                        month.month,
+                        month.invoice_bill_uuid,
+                        recorded.invoice_downloaded_at,
+                    )
+                    match upserted:
+                        case Err(error):
+                            return Err(error)
+                        case Ok(_):
+                            pass
+                    skipped += 1
+                months += 1
+    finally:
+        if manifest is not None:
+            manifest.close()
+
+    return Ok(
+        SyncSummary(
+            settlements=months,
+            settlements_skipped=skipped,
+            settlements_invoices=invoices,
+            seconds=time.monotonic() - start,
+        )
+    )
+
+
 async def run_documents(
     *,
     client: HttpClient,
@@ -417,4 +566,4 @@ async def run_documents(
     raise AssertionError("unreachable until the gated spike task implements the walk")
 
 
-__all__ = ["SyncSummary", "run", "run_documents", "run_messages"]
+__all__ = ["SyncSummary", "run", "run_documents", "run_messages", "run_settlements"]

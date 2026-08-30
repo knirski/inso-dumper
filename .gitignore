@@ -19,5 +19,6 @@ __pycache__/
 .commandcode/
 
 # Dump output: contains children's personal data (photos, videos,
-# attachments, post text). Never commit.
-dump/
+# attachments, post text). Never commit. Anchored to the repo root so
+# source code under src/inso_dumper/dump/ stays trackable.
+/dump/
