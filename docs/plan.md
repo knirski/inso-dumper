@@ -66,13 +66,17 @@ deferred to Phase 6.
 
 ## Phase 4 — Messages + documents 🔄
 
-Split into two specs:
+Split into three specs (messages shipped, settlements shipped, documents gated):
 
 - **Messages** — `docs/specs/2026-08-29-messages-and-documents/plan.json`
   approved (10 tasks, PR #8 merged). Key discovery: conversations are
   **account-level** (`?child=` accepted but ignored), so storage is
   `dump/messages/`, amending the PRD sketch. Manifest schema v3 adds a
   `conversations` table; tail fetch via `startingIndex`.
+  **Real-traffic validation (Aug 2026):** 150 messages / 334 attachments
+  across 2 conversations walked clean after modeling three legacy
+  payload shapes (bare-list attachments, `{thumb, mp4}` video URLs,
+  `isRemoved`-as-name system events) — PR #16.
 - **Documents** — same spec, but gated: only `breadcrumbs` of the drive API
   could be verified (empty drive). `sync_documents` fails safe
   (`documents_unverified`) until a real capture pins the file/download shapes.
@@ -86,8 +90,10 @@ the user's real session.
 
 ## Phase 5 — Incremental + indexes 🔄
 
-- ✅ Incremental for posts (manifest skip, `--force`), incremental for
-  conversations planned in the messages spec (manifest v3 tail fetch).
+- ✅ Incremental for posts (manifest skip, `--force`); incremental for
+  conversations shipped with the messages spec (manifest v3 tail fetch,
+  real-traffic verified Aug 2026); incremental for settlements via the
+  v4 manifest (invoice skip, real-traffic verified Aug 2026).
 - ⬜ `_index.json` + top-level `index.html` (by date/child/event name).
 - ⬜ Per-event `index.html` gallery (deferred from Phase 2).
 
@@ -100,7 +106,7 @@ posts); a new announcement/message appears after the next sync.
 - ⬜ `materialize` command (resolve hardlinks/symlinks to copies).
 - ⬜ README with privacy notes; packaging (`uv tool install`).
 
-## Phase 7 — Settlements follow-up spec 🔄
+## Phase 7 — Settlements follow-up spec ✅
 
 - ✅ Discovery spike done (browser session, Aug 2026): settlements is
   **fully server-rendered HTML** (no JSON API). Two listing pages —
@@ -109,10 +115,14 @@ posts); a new announcement/message appears after the next sync.
   direct `application/pdf` invoice downloads at
   `/panel/settlement/<bill-uuid>/invoice` (session-cookie auth, no
   CloudFront signing). Findings in `api-notes.md` § Settlements.
-- ⬜ Follow-up spec (design + plan): per-child HTML scrape of both
-  pages, itemized-details parse, invoice PDF downloads, Polish
-  month-name date normalization; unpaid/partial-saldo variants remain
-  unverified — parsers fail loud.
+- ✅ Spec + implementation shipped (`docs/specs/2026-08-30-settlements/`,
+  PR #15): parsed JSON + PDFs, history page only, `--category
+  settlements` (per child, in default `all`), schema-v4 per-child
+  manifest with the strict `{0, 4}` gate, `--force <YYYY-MM>`.
+  **Real-traffic validation (Aug 2026):** 47 months parsed, all
+  invoices downloaded once, second run reports
+  `47 settlements (47 skipped, 0 invoices)`. Unpaid/partial-saldo
+  badge variants remain uncaptured — parsers fail loud (`UNKNOWN`).
 
 ## Risks / mitigations
 
