@@ -8,7 +8,8 @@
     "Read-only guarantee: only GET requests are ever issued; POST /system-api/conversations/read-all-unread (mark-as-read), POST /system-api/messages/attachment (upload), and all /drive/directory* and /drive/file* write endpoints are never called (test-pinned).",
     "Disk invariants: dump/ 0700 dirs, 0600 files, gitignored output; signed URLs never relied on (bytes in _common/ are the durable artifact).",
     "Manifest schema gate: a manifest with PRAGMA user_version not in {0, 3} is rejected with Err(CONFIG, 'manifest_schema') — loud, no silent migration; the v2 posts table and its accessors are unchanged.",
-    "AGENTS.md rules (uv-only, functional core / imperative shell, Result-typed boundaries that never raise, match/assert_never for closed unions) are honored end-to-end."
+    "AGENTS.md rules (uv-only, functional core / imperative shell, Result-typed boundaries that never raise, match/assert_never for closed unions) are honored end-to-end.",
+    "Account-level data stays account-level: the conversations manifest lives at dump/messages/.manifest.sqlite and messages/documents sync runs once per invocation regardless of how many children are synced."
   ],
   "phases": [
     {
@@ -61,7 +62,9 @@
         {
           "id": "T2",
           "name": "Pure parsers for the conversations and messages envelopes",
-          "depends_on": ["T1"],
+          "depends_on": [
+            "T1"
+          ],
           "inputs": [
             "design.md Findings section (the messages envelope is a BARE LIST — no wrapper)",
             "http/timeline.py parser pattern (json.loads -> model_validate, drift -> PLATFORM_CHANGED)"
@@ -70,11 +73,10 @@
           "files": {
             "reuse": [],
             "create": [
-              "tests/unit/test_http_messages.py"
-            ],
-            "modify": [
+              "tests/unit/test_http_messages.py",
               "src/inso_dumper/http/messages.py"
             ],
+            "modify": [],
             "delete": []
           },
           "new_abstractions": [],
@@ -95,7 +97,9 @@
         {
           "id": "T3",
           "name": "Provisional drive models and listing parser",
-          "depends_on": ["T1"],
+          "depends_on": [
+            "T1"
+          ],
           "inputs": [
             "docs/api-notes-data/drive-items-sample.json (only breadcrumbs verified — drive was empty)",
             "design.md gotcha: directories/files shapes are provisional (videos precedent)"
@@ -142,12 +146,14 @@
         {
           "id": "T4",
           "name": "list_conversations shell with loadOlder walk",
-          "depends_on": ["T2"],
+          "depends_on": [
+            "T2"
+          ],
           "inputs": [
             "list_posts house pattern (async generator yielding CliResult items, Err ends iteration)",
             "design.md Findings: ?category=main, &loadOlder=1 on subsequent pages, empty page stops"
           ],
-          "description": "Add to src/inso_dumper/http/messages.py an async def list_conversations(client, session) -> AsyncIterator[CliResult[Conversation]]: first page GET /system-api/conversations?category=main, subsequent pages add &loadOlder=1; PHPSESSID cookie header on every request; yields Ok(conversation) per conversation; stops when a page's conversations list is empty; non-200 -> Err(CliError(HTTP, subject=f'conversations_status_{status}')); transport Err propagated unchanged. Never calls read-all-unread.",
+          "description": "Add to src/inso_dumper/http/messages.py an async def list_conversations(client, session) -> AsyncIterator[CliResult[Conversation]]: first page GET /system-api/conversations?category=main, subsequent pages add &loadOlder=1; PHPSESSID cookie header on every request; yields Ok(conversation) per conversation; stops when a page's conversations list is empty; non-200 -> Err(CliError(HTTP, subject=f'conversations_status_{status}')); transport Err propagated unchanged. Never calls read-all-unread. No-progress guard: the walk also stops when a page yields only conversation ids already seen (protects against a server ignoring loadOlder and re-serving the first page forever).",
           "files": {
             "reuse": [
               "src/inso_dumper/http/client.py (HttpClient Protocol)",
@@ -167,7 +173,8 @@
               "empty first page yields nothing and stops after one request",
               "non-200 surfaces Err(HTTP, 'conversations_status_500')",
               "client Err propagated unchanged and iteration ends",
-              "no request path ever contains read-all-unread"
+              "no request path ever contains read-all-unread",
+              "a server that ignores loadOlder (same page twice) terminates after the repeat page instead of looping forever"
             ],
             "acceptance": [
               "uv run pytest tests/unit/test_http_messages.py -q is green",
@@ -178,11 +185,13 @@
         {
           "id": "T5",
           "name": "fetch_messages shell with startingIndex pagination",
-          "depends_on": ["T2"],
+          "depends_on": [
+            "T2"
+          ],
           "inputs": [
             "design.md Findings: GET /system-api/conversations/{id}?messages=1[&startingIndex=N], 30 messages per page (verified)"
           ],
-          "description": "Add to src/inso_dumper/http/messages.py an async def fetch_messages(client, session, conversation_id: str, starting_index: int = 0) -> AsyncIterator[CliResult[list[Message]]]: builds f'/system-api/conversations/{conversation_id}?messages=1&startingIndex={starting_index}', yields each parsed page as a list, advances starting_index by the page length, stops when a page yields fewer than 30 items (or 0). Error mapping mirrors T4 with subject f'messages_status_{status}'. The consumer dedupes by message id, so boundary overlap is harmless.",
+          "description": "Add to src/inso_dumper/http/messages.py an async def fetch_messages(client, session, conversation_id: str, starting_index: int = 0) -> AsyncIterator[CliResult[list[Message]]]: builds f'/system-api/conversations/{conversation_id}?messages=1&startingIndex={starting_index}', yields each parsed page as a list, advances starting_index by the page length, stops when a page yields zero messages (one request past the end — the server page size is not assumed; Open Question 4 resolved). Error mapping mirrors T4 with subject f'messages_status_{status}'. The consumer dedupes by message id, so boundary overlap is harmless.",
           "files": {
             "reuse": [],
             "create": [],
@@ -195,8 +204,8 @@
           "new_abstractions": [],
           "validation": {
             "tests": [
-              "scripted 30 + 30 + 12 walk yields three pages in order with startingIndex 0, 30, 60 and stops after the short page",
-              "single short page (5 messages) yields one page and stops",
+              "scripted 30 + 30 + 12 walk yields three pages in order with startingIndex 0, 30, 60, makes one final request that returns an empty page, then stops",
+              "a 5-message page yields one page, requests once more for the empty tail page, then stops",
               "non-200 surfaces Err(HTTP, 'messages_status_403')",
               "client Err propagated unchanged"
             ],
@@ -209,7 +218,9 @@
         {
           "id": "T6",
           "name": "walk_drive shell: depth-first listing traversal",
-          "depends_on": ["T3"],
+          "depends_on": [
+            "T3"
+          ],
           "inputs": [
             "design.md API Design: GET /drive/items[/{directoryId}], DFS until a directory yields no new directories",
             "provisional node shapes: extract id/name defensively from the permissive directories objects, drift -> Err(PLATFORM_CHANGED, 'drive_node')"
@@ -217,10 +228,11 @@
           "description": "Add to src/inso_dumper/http/drive.py an async def walk_drive(client, session) -> AsyncIterator[CliResult[tuple[str, DriveListing]]]: fetch /drive/items, yield ('', listing), then for each entry in listing.directories extract id and name (missing/blank -> Err(PLATFORM_CHANGED, 'drive_node')), descend via GET /drive/items/{id}, yield (relative_path, listing) where relative_path joins directory names with '/', recursing depth-first. Error mapping mirrors T4/T5 with subject f'drive_status_{status}'. Read-only: no /drive/directory* or /drive/file* write paths are ever requested.",
           "files": {
             "reuse": [],
-            "create": [],
+            "create": [
+              "tests/unit/test_http_drive.py"
+            ],
             "modify": [
-              "src/inso_dumper/http/drive.py",
-              "tests/unit/test_models_drive.py"
+              "src/inso_dumper/http/drive.py"
             ],
             "delete": []
           },
@@ -231,7 +243,8 @@
               "empty drive yields exactly one ('', listing) entry",
               "directory entry missing id -> Err(PLATFORM_CHANGED, 'drive_node')",
               "non-200 surfaces Err(HTTP, 'drive_status_500'); client Err propagated",
-              "no request path ever contains /drive/directory/ or /drive/file/ write endpoints"
+              "no request path ever contains /drive/directory/ or /drive/file/ write endpoints",
+              "a directory named \"../escape\" or \"a/b\" yields a slugified single-segment path component that stays under dump/documents/"
             ],
             "acceptance": [
               "walk_drive exported in __all__",
@@ -253,7 +266,7 @@
             "dump/manifest.py (v2: posts table, recorded_dir, upsert, force_clear, open_manifest gate)",
             "design.md Data Model (schema v3, PRAGMA user_version = 3)"
           ],
-          "description": "Modify src/inso_dumper/dump/manifest.py: bump _SCHEMA_VERSION to 3; add CREATE TABLE IF NOT EXISTS conversations (conversation_id TEXT PRIMARY KEY, dir_name TEXT NOT NULL, last_update INTEGER NOT NULL, message_count INTEGER NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL) to the schema script; schema gate becomes user_version not in (0, 3) -> Err(CONFIG, 'manifest_schema'). New frozen-slots dataclass ConversationRecord (conversation_id, dir_name, last_update, message_count). Accessors follow the established swallow-and-warn read semantics: recorded_conversation(post_id -> conversation_id) -> ConversationRecord | None; upsert_conversation(...) with ON CONFLICT(conversation_id) DO UPDATE (dir_name, last_update, message_count, last_seen_at); force_clear_conversation(id). Posts table and accessors unchanged.",
+          "description": "Modify src/inso_dumper/dump/manifest.py: bump _SCHEMA_VERSION to 3; add CREATE TABLE IF NOT EXISTS conversations (conversation_id TEXT PRIMARY KEY, dir_name TEXT NOT NULL, last_update INTEGER NOT NULL, message_count INTEGER NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL) to the schema script; schema gate becomes user_version not in (0, 3) -> Err(CONFIG, 'manifest_schema'). New frozen-slots dataclass ConversationRecord (conversation_id, dir_name, last_update, message_count). Accessors follow the established swallow-and-warn read semantics: recorded_conversation(post_id -> conversation_id) -> ConversationRecord | None; upsert_conversation(...) with ON CONFLICT(conversation_id) DO UPDATE (dir_name, last_update, message_count, last_seen_at); force_clear_conversation(id). Posts table and accessors unchanged. A manifest rejected by the gate (e.g. v2) is recovered by deleting the .manifest.sqlite file (skip state is lost; bytes and dump output are untouched) — document this in the module docstring.",
           "files": {
             "reuse": [],
             "create": [],
@@ -290,7 +303,10 @@
         {
           "id": "T8",
           "name": "dump/messages.py: conversation disk writer",
-          "depends_on": ["T1", "T7"],
+          "depends_on": [
+            "T1",
+            "T7"
+          ],
           "inputs": [
             "dump/writer.py (ensure_private_dir, write_deduped_media, link_media_to_post, _write_bytes pattern)",
             "dump/layout.py (sha256_hex, models ext_from)",
@@ -336,12 +352,18 @@
         {
           "id": "T9",
           "name": "sync_messages, sync_documents, and category dispatch",
-          "depends_on": ["T4", "T5", "T6", "T7", "T8"],
+          "depends_on": [
+            "T4",
+            "T5",
+            "T6",
+            "T7",
+            "T8"
+          ],
           "inputs": [
             "dump/sync.py run() dispatch and SyncSummary",
             "design.md sync-flow pseudo-code and US-1/2/3/4/5"
           ],
-          "description": "Modify src/inso_dumper/dump/sync.py. SyncSummary gains conversations: int = 0, messages: int = 0, message_attachments: int = 0, documents: int = 0 (keyword construction everywhere). sync_messages(client, session, dump_root, manifest, force, log): for each conversation from list_conversations: recorded = manifest.recorded_conversation(id); skip when recorded and recorded.last_update == conversation.last_update and slug/id not in forced; starting = recorded.message_count if recorded and not forced else 0; if forced (id or dir_name match) manifest.force_clear_conversation(id); collect tail pages from fetch_messages(id, starting); resolve dir; write_conversation (new) or append_messages (tail); for each attachment of NEW messages: download via download_media-style fetch (reuse the timeline download pattern with the attachment's url.full) then link_message_attachment; upsert_conversation(id, dir.name, last_update, new total count). sync_documents(client, session, dump_root, log): if the drive download URL has not been verified against a non-empty capture (module-level flag set by the gated spike task), return Err(CliError(HTTP, subject='documents_unverified')) — fail safe, never guess; once verified, walk_drive: per file entry download -> write_deduped_media -> place link under dump/documents/<relative_path>. run() gains a category dispatch mapping Category-like choices to (sync_announcements/galleries timeline path) + sync_messages + sync_documents, all Err short-circuiting as today. Regression test pins that no request path matches the forbidden write endpoints.",
+          "description": "Modify src/inso_dumper/dump/sync.py. Account-level execution: conversations and documents are account data — their manifest lives at dump_root/'messages'/'.manifest.sqlite' (created via open_manifest, same gate), and sync_messages/sync_documents run exactly once per invocation regardless of the <child-slug> argument; the child selects only announcements/galleries. SyncSummary gains conversations: int = 0, messages: int = 0, message_attachments: int = 0, documents: int = 0 (keyword construction everywhere). sync_messages(client, session, dump_root, manifest, force, log): for each conversation from list_conversations: recorded = manifest.recorded_conversation(id); skip when recorded and recorded.last_update == conversation.last_update and slug/id not in forced; starting = recorded.message_count if recorded and not forced else 0; if forced (id or dir_name match) manifest.force_clear_conversation(id); collect tail pages from fetch_messages(id, starting); resolve dir; write_conversation (new) or append_messages (tail) — append_messages first verifies the on-disk message count equals recorded.message_count and returns Err(CliError(INTERNAL, subject=\"messages_history_truncated\")) on mismatch (truncation fail-safe; recovery is --force full refetch); for each attachment of NEW messages: download via download_media-style fetch (reuse the timeline download pattern with the attachment's url.full) then link_message_attachment; upsert_conversation(id, dir.name, last_update, new total count). sync_documents(client, session, dump_root, log): if the drive download URL has not been verified against a non-empty capture (module-level flag set by the gated spike task), return Err(CliError(CONFIG, subject='documents_unverified')) — fail safe, never guess; CONFIG (exit 2) because the gate is missing verified platform knowledge, not a transport failure; once verified, walk_drive: per file entry download -> write_deduped_media -> place link under dump/documents/<relative_path>. run() gains a category dispatch mapping Category-like choices to (sync_announcements/galleries timeline path) + sync_messages + sync_documents, all Err short-circuiting as today. Regression test pins that no request path matches the forbidden write endpoints.",
           "files": {
             "reuse": [
               "src/inso_dumper/http/timeline.py (download_media pattern)",
@@ -363,8 +385,10 @@
               "fixture gains a new message with changed last_update: tail fetch issues startingIndex=<old count> only, prior messages preserved, message_count updated",
               "last_update changed but count equal still tail-fetches (fetch is driven by the counter, verified by assertion)",
               "--force with the conversation id clears the row and refetches from startingIndex 0",
-              "sync_documents on an unverified-URL gate returns Err(HTTP, 'documents_unverified') without network calls",
-              "no request path matches read-all-unread, messages/attachment, /drive/directory, or /drive/file (forbidden endpoints)"
+              "sync_documents on an unverified-URL gate returns Err(CONFIG, 'documents_unverified') without network calls",
+              "no request path matches read-all-unread, messages/attachment, /drive/directory, or /drive/file (forbidden endpoints)",
+              "running sync for a second child does not re-request conversations or drive listings (account-level work happens once per invocation)",
+              "a messages.json whose count disagrees with the manifest yields Err(INTERNAL, messages_history_truncated) and no tail is appended"
             ],
             "acceptance": [
               "uv run pytest tests/unit/test_dump_sync.py -q is green",
@@ -381,7 +405,9 @@
         {
           "id": "T10",
           "name": "Category extension and per-type summary",
-          "depends_on": ["T9"],
+          "depends_on": [
+            "T9"
+          ],
           "inputs": [
             "cli.py sync command (_dispatch, _categories_for, summary builder)",
             "design.md CLI surface (--category {announcements,galleries,messages,documents,all}, default all; summary format)"

@@ -248,18 +248,29 @@ Layer rules:
   attachments via `writer.link_media_to_post`.
 - `dump/sync.py` orchestrates and owns the manifest; the CLI only
   dispatches and prints.
+- **Account-level manifest and execution**: conversations are
+  account-level data, so their manifest lives at
+  `dump/messages/.manifest.sqlite` (own SQLite file, same schema-gate
+  rules) — never inside a per-child manifest. `sync_messages` and
+  `sync_documents` run **once per invocation** regardless of how many
+  children the account has; the `<child-slug>` argument only selects
+  the announcements/galleries categories. The summary line reports
+  account-level segments without attributing them to a child:
+  `…, 3 conversations (41 new messages, 6 attachments), 12 documents
+  for the account in 95.3s.` (the `for <child-slug>` tail covers only
+  the per-child announcements/galleries segments).
 
 ### Sync flow (messages category)
 
 ```
-for page in list_conversations():          # loadOlder walk, empty page stops
-    for conversation in page:
+for conv_page in list_conversations():     # loadOlder walk, empty/no-progress stops
+    for conversation in conv_page:
         recorded = manifest.recorded_conversation(id)
         if recorded and recorded.last_update == conversation.last_update:
             skip
         starting = recorded.message_count if recorded else 0
-        for page in fetch_messages(id, starting):   # 30/page, tail only
-            new_messages.extend(page)
+        for msg_page in fetch_messages(id, starting):
+            new_messages.extend(msg_page)            # dedupe by message id
         dir = writer.resolve_conversation_dir(...)  # assigned once, stored
         write conversation.json + append messages.json
         for attachment in new messages: download → dedup → link
@@ -267,7 +278,12 @@ for page in list_conversations():          # loadOlder walk, empty page stops
 ```
 
 Documents: DFS from `/drive/items`; per file: download → dedup → place
-under `dump/documents/<path>` as a link into `_common/`.
+under `dump/documents/<path>` as a link into `_common/`. Every drive
+directory name is sanitized before joining the relative path — the same
+`_slugify` rule used for post/recipient names — so a platform-supplied
+name containing `/`, `\`, or `..` can never escape
+`dump/documents/`; empty names after slugification fall back to
+`directory`.
 
 ## API Design
 
@@ -336,8 +352,13 @@ dump/
 ```
 
 `messages.json` is the source of truth for the history; re-runs read
-its count from the manifest (not from the file) so a truncated file is
-recoverable by `--force`.
+the expected count from the manifest. **Truncation fail-safe**: before
+appending a tail, the writer compares the on-disk message count with
+the manifest's `message_count`; on mismatch it returns
+`Err(CliError(INTERNAL, subject='messages_history_truncated'))` and the
+run stops — the user re-dumps the conversation with `--force`
+(full refetch from 0), which rebuilds the file. The tail is never
+appended onto a file that disagrees with the manifest.
 
 ## Trade-offs
 
