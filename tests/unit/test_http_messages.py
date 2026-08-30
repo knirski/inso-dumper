@@ -389,6 +389,54 @@ def test_fetch_messages_short_page_still_requests_empty_tail() -> None:
     assert client.calls[1]["path"] == "/system-api/conversations/c?messages=1&startingIndex=5"
 
 
+def test_fetch_messages_clamped_starting_index_terminates() -> None:
+    """A server that ignores startingIndex (same page forever) must not
+    loop; the walk stops after the repeated page (review fix)."""
+    from inso_dumper.http.messages import fetch_messages
+
+    same_page = _message_page(2)
+    client = FakeHttpClientScript([_response(200, same_page) for _ in range(10)])
+    session = make_session()
+
+    async def _run() -> list[int]:
+        counts: list[int] = []
+        async for item in fetch_messages(client, session, "c"):
+            match item:
+                case Err(error):
+                    raise AssertionError(f"unexpected error: {error}")
+                case Ok(page):
+                    counts.append(len(page))
+        return counts
+
+    counts = asyncio.run(_run())
+    assert counts == [2]  # first page yielded; the repeat ends the walk
+    assert len(client.calls) == 2
+
+
+def test_fetch_messages_overlapping_pages_are_yielded_once_each() -> None:
+    """A page that repeats *some* earlier ids but carries new ones still
+    yields; only an all-duplicate page ends the walk."""
+    from inso_dumper.http.messages import fetch_messages
+
+    client = FakeHttpClientScript(
+        [
+            _response(200, _message_page(2)),  # m0, m1
+            _response(200, _message_page(2, offset=1)),  # m1, m2 (overlap)
+            _response(200, b"[]"),
+        ]
+    )
+    session = make_session()
+
+    async def _run() -> list[int]:
+        counts: list[int] = []
+        async for item in fetch_messages(client, session, "c"):
+            assert isinstance(item, Ok)
+            counts.append(len(item.value))
+        return counts
+
+    assert asyncio.run(_run()) == [2, 2]
+
+
 def test_fetch_messages_non_200_is_http_error() -> None:
     from inso_dumper.http.messages import fetch_messages
 

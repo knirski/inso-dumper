@@ -286,7 +286,7 @@ def test_sync_happy_path_dumps_post_and_dedupes_media(
     )
 
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
-    assert "Synced 1 posts" in result.stdout
+    assert "Synced 1 announcements" in result.stdout
     assert "0 skipped" in result.stdout
     post_dir = dump / "franek" / "announcements" / "2026-08-27-wycieczka"
     assert (post_dir / "post.json").is_file()
@@ -314,4 +314,134 @@ def test_sync_second_run_reports_skipped(
 
     assert second.exit_code == 0, (second.stdout or "") + (second.stderr or "")
     assert "1 skipped" in second.stdout
-    assert "Synced 0 posts" in second.stdout
+    assert "Synced 0 announcements" in second.stdout
+
+
+# --- T10: category extension and per-type summary -------------------------------
+
+CONV_ID = "5b8789d6-4b05-11ed-9234-06f545343a70"
+
+
+def _conv_payload(last_update: int = 1787814351) -> dict[str, Any]:
+    return {
+        "id": CONV_ID,
+        "lastUpdate": last_update,
+        "recipient": {"name": "Zolta", "description": "W", "type": "teachers", "prefix": "G:"},
+        "read": True,
+        "excerpt": "e",
+        "branch": "b",
+        "participantsNames": [],
+    }
+
+
+def _msg_payload(msg_id: str, with_attachment: bool = False) -> dict[str, Any]:
+    attachments: Any = []
+    if with_attachment:
+        attachments = {
+            "media": [
+                {
+                    "name": "IMG_1.jpeg",
+                    "url": {
+                        "thumb": "https://file.inso.pl/t/1/thumb.jpg",
+                        "full": "https://file.inso.pl/t/1/full.jpeg",
+                    },
+                    "isVideo": False,
+                }
+            ],
+            "other": [],
+        }
+    return {
+        "id": msg_id,
+        "message": "hello",
+        "sendDate": "czwartek,  9:05",
+        "sendTimestamp": 1787814351,
+        "sender": {"type": "worker", "name": "A", "initials": "A", "avatar": None},
+        "incoming": True,
+        "attachments": attachments,
+        "main": False,
+        "isRemoved": False,
+        "canRemove": False,
+    }
+
+
+def _conv_page(convs: list[dict[str, Any]]) -> tuple[int, bytes, list]:
+    body = json.dumps(
+        {"categories": [], "category": "main", "conversations": convs, "templates": [], "unreadCount": 0}
+    ).encode()
+    return (200, body, [])
+
+
+def _msg_page(msgs: list[dict[str, Any]]) -> tuple[int, bytes, list]:
+    return (200, json.dumps(msgs).encode(), [])
+
+
+def _messages_script() -> list[Any]:
+    return [
+        _conv_page([_conv_payload()]),
+        _msg_page([_msg_payload("m1", with_attachment=True)]),
+        _msg_page([]),
+        (200, b"attachment-bytes", []),
+        _conv_page([]),
+    ]
+
+
+def test_sync_messages_category_happy_path(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dump = _prepare_sync_env(tmp_path, monkeypatch, _messages_script())
+    result = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    assert "1 conversations (1 new messages, 1 attachments)" in result.stdout
+    conv_dir = dump / "messages" / "2026-08-27-zolta"
+    assert (conv_dir / "conversation.json").is_file()
+    assert (conv_dir / "messages.json").is_file()
+    assert (conv_dir / "attachments" / "m1" / "1.jpeg").exists()
+    from tests.conftest import FakeHttpClient  # noqa: F401
+
+
+def test_sync_messages_second_run_reports_skipped(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dump = _prepare_sync_env(tmp_path, monkeypatch, _messages_script())
+    first = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+    assert first.exit_code == 0, (first.stdout or "") + (first.stderr or "")
+
+    # same lastUpdate -> skipped; only list requests
+    rerun = _prepare_sync_env(
+        tmp_path,
+        monkeypatch,
+        [_conv_page([_conv_payload()]), _conv_page([])],
+    )
+    assert rerun is not None
+    second = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+
+    assert second.exit_code == 0, (second.stdout or "") + (second.stderr or "")
+    assert "0 conversations (0 new messages, 0 attachments)" in second.stdout
+
+
+def test_sync_both_category_rejected_exits_2(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _prepare_sync_env(tmp_path, monkeypatch, _messages_script())
+    result = cli_runner.invoke(app, ["sync", "franek", "--category", "both"])
+    assert result.exit_code == 2
+
+
+def test_sync_default_runs_all_categories_documents_gated(
+    cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No --category: posts (per child) + messages + documents. The
+    documents gate is a loud skip, not a hard failure; its segment is
+    absent from the summary."""
+    galleries_empty = (200, json.dumps({"items": [], "waitingToProcess": 0}).encode(), [])
+    script = [*_sync_script(second_run=False), galleries_empty, *_messages_script()]
+    dump = _prepare_sync_env(tmp_path, monkeypatch, script)
+    result = cli_runner.invoke(app, ["sync", "franek", "--dump-root", str(dump)])
+
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "1 announcements" in result.stdout
+    assert "1 conversations (1 new messages, 1 attachments)" in result.stdout
+    assert "documents for" not in result.stdout  # gate tripped: no segment
+    assert "unverified" in combined  # loud skip warning

@@ -20,6 +20,7 @@ stop). Read-only GETs only — ``POST .../read-all-unread`` and
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from pydantic import ValidationError
@@ -29,6 +30,8 @@ from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.client import HttpClient
 from inso_dumper.models.messages import Conversation, ConversationListPage, Message
 from inso_dumper.models.session import Session
+
+log = logging.getLogger("inso_dumper.http.messages")
 
 _CONVERSATIONS_PATH = "/system-api/conversations"
 
@@ -129,7 +132,10 @@ async def list_conversations(
             yield Ok(conversation)
         if not progressed:
             # The server re-served only known conversations (e.g. it
-            # ignored loadOlder): no new pages are coming.
+            # ignored loadOlder): no new pages are coming. If this fires
+            # on a live account whose ordering shifted mid-walk, older
+            # conversations may be missed — a --force rerun covers that.
+            log.warning("conversations walk ended on a no-progress page")
             return
         load_older = True
 
@@ -144,12 +150,15 @@ async def fetch_messages(
 
     Yields each parsed page as a list; advances ``startingIndex`` by the
     page length; stops when a page yields zero messages (one request
-    past the end — the server page size is not assumed). The consumer
-    dedupes by message id, so boundary overlap is harmless. Non-200
-    surfaces ``Err(HTTP, 'messages_status_<n>')``.
+    past the end — the server page size is not assumed) or when a page
+    repeats only already-seen ids (a server clamping ``startingIndex``
+    would otherwise loop forever). The consumer dedupes by message id,
+    so boundary overlap is harmless. Non-200 surfaces
+    ``Err(HTTP, 'messages_status_<n>')``.
     """
     headers = {"Cookie": f"PHPSESSID={session.phpsessid}"}
     offset = starting_index
+    seen_ids: set[str] = set()
     while True:
         path = f"{_CONVERSATIONS_PATH}/{conversation_id}?messages=1&startingIndex={offset}"
         result = await client.request("GET", path, headers=headers)
@@ -174,6 +183,17 @@ async def fetch_messages(
                 pass
         if not page:
             return
+        if all(message.id in seen_ids for message in page):
+            # A clamped/repeated page: with offset pagination no
+            # legitimate page repeats an id, so no new pages are coming.
+            log.warning(
+                "messages walk for %s ended on a no-progress page at startingIndex=%d",
+                conversation_id,
+                offset,
+            )
+            return
+        for message in page:
+            seen_ids.add(message.id)
         offset += len(page)
         yield Ok(page)
 

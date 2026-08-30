@@ -1,17 +1,26 @@
-"""Per-child SQLite manifest: idempotent sync state.
+"""SQLite manifests: idempotent sync state.
 
-The manifest is the shell boundary for the SQLite state DB at
-``dump/<child-slug>/announcements/.manifest.sqlite``. One table,
-``posts``; ``post_id`` is the sole dedup key (a post re-appearing
-across pages or categories updates the row instead of tripping a
-UNIQUE constraint). ``post_slug`` is a plain, indexed column used by
-``--force``.
+The manifest is the shell boundary for the SQLite state DB. Two
+locations exist:
+
+- ``dump/<child-slug>/announcements/.manifest.sqlite`` — per-child posts
+  state (the ``posts`` table; ``post_id`` is the sole dedup key, a post
+  re-appearing across pages or categories updates the row instead of
+  tripping a UNIQUE constraint). ``post_slug`` is a plain, indexed
+  column used by ``--force``.
+- ``dump/messages/.manifest.sqlite`` — account-level conversations
+  state (the ``conversations`` table; ``conversation_id`` is the sole
+  key). ``last_update`` drives the incremental skip, ``message_count``
+  is the tail-fetch ``startingIndex``. Never inside a per-child
+  manifest: conversations are account-level data.
 
 All ``sqlite3.Error`` are caught at the boundary and converted to
 ``Err(CliError(INTERNAL, subject='manifest_<op>'))``; a manifest whose
-``user_version`` is newer than this code understands is
-``Err(CliError(CONFIG, subject='manifest_schema'))`` — the user's data
-needs a newer dumper, not silent corruption.
+``user_version`` is not one this code understands (0 or 3) is
+``Err(CliError(CONFIG, subject='manifest_schema'))`` — loud, no silent
+migration. Documented recovery from a rejected (e.g. v2) manifest:
+delete the ``.manifest.sqlite`` file; skip state is lost but dump
+output and deduped bytes are untouched.
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,7 +38,7 @@ from inso_dumper.models.timeline import Post
 
 log = logging.getLogger("inso_dumper.dump.manifest")
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
@@ -42,7 +52,26 @@ CREATE TABLE IF NOT EXISTS posts (
     media_count   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS posts_by_slug ON posts (post_slug);
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    dir_name        TEXT NOT NULL,
+    last_update     INTEGER NOT NULL,
+    message_count   INTEGER NOT NULL,
+    first_seen_at   TEXT NOT NULL,
+    last_seen_at    TEXT NOT NULL
+);
 """
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRecord:
+    """One recorded conversation: everything the skip/tail decision
+    needs in a single read."""
+
+    conversation_id: str
+    dir_name: str
+    last_update: int
+    message_count: int
 
 
 class _SchemaVersionError(Exception):
@@ -142,6 +171,76 @@ class Manifest:
             return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_force_clear"))
         return Ok(None)
 
+    def recorded_conversation(self, conversation_id: str) -> ConversationRecord | None:
+        """The recorded conversation, or ``None`` when unknown. The read
+        side of the conversations skip/tail check; a (essentially
+        impossible) query failure reads as "unknown" with a warning."""
+        if self._conn is None:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT conversation_id, dir_name, last_update, message_count"
+                " FROM conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            log.warning("conversation manifest read failed for %s", conversation_id)
+            return None
+        if row is None:
+            return None
+        return ConversationRecord(
+            conversation_id=str(row[0]),
+            dir_name=str(row[1]),
+            last_update=int(row[2]),
+            message_count=int(row[3]),
+        )
+
+    def upsert_conversation(
+        self, conversation_id: str, dir_name: str, last_update: int, message_count: int
+    ) -> CliResult[None]:
+        """Insert or update by ``conversation_id`` (sole key);
+        ``first_seen_at`` is set on insert and preserved on update."""
+        if self._conn is None:
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_closed"))
+        now = datetime.now(UTC).isoformat()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO conversations (conversation_id, dir_name, last_update,
+                                           message_count, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    dir_name = excluded.dir_name,
+                    last_update = excluded.last_update,
+                    message_count = excluded.message_count,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (conversation_id, dir_name, last_update, message_count, now, now),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            log.warning("conversation manifest upsert failed for %s", conversation_id)
+            return Err(
+                CliError(kind=CliErrorKind.INTERNAL, subject="manifest_conversation_upsert")
+            )
+        return Ok(None)
+
+    def force_clear_conversation(self, conversation_id: str) -> CliResult[None]:
+        """Remove the conversation row; used by ``--force`` before a
+        full re-fetch so an interrupted forced run leaves no stale row."""
+        if self._conn is None:
+            return Err(CliError(kind=CliErrorKind.INTERNAL, subject="manifest_closed"))
+        try:
+            self._conn.execute(
+                "DELETE FROM conversations WHERE conversation_id = ?", (conversation_id,)
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            return Err(
+                CliError(kind=CliErrorKind.INTERNAL, subject="manifest_conversation_force_clear")
+            )
+        return Ok(None)
+
     def close(self) -> None:
         """Idempotent close."""
         if self._conn is not None:
@@ -165,4 +264,4 @@ def open_manifest(path: Path) -> CliResult[Manifest]:
     return Ok(manifest)
 
 
-__all__ = ["Manifest", "open_manifest"]
+__all__ = ["ConversationRecord", "Manifest", "open_manifest"]
