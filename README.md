@@ -2,14 +2,13 @@
 
 Local backup tool for the Inso platform ([app.inso.pl](https://app.inso.pl)).
 Authenticates against a parent account and dumps announcements, messages, and
-documents available to that parent, per child, with deduplication into a
-shared area.
+documents available to that parent, with deduplication into a shared area.
 
-This is the **foundation** spec (M1) plus the **announcements-and-dedup**
-spec (M1 finish + M2). It ships `inso-dumper login`, `inso-dumper
-children`, and `inso-dumper sync` (announcements and galleries with
-photo/video/attachment deduplication); messages, documents, indexes, and
-the `verify`/`materialize` sub-commands land in follow-up specs.
+This ships the **foundation** (M1), **announcements-and-dedup** (M1 finish +
+M2), and **messages-and-documents** (M3: communicator + drive) specs:
+`inso-dumper login`, `children`, and `sync` for announcements, galleries,
+messages, and documents. Indexes and the `verify`/`materialize`
+sub-commands land in follow-up specs.
 
 ## Quick start
 
@@ -28,18 +27,23 @@ uv run inso-dumper children
 # JSON for scripting
 uv run inso-dumper children --json
 
-# dump announcements + galleries for one child (deduplicated)
+# dump everything (announcements + galleries per child, messages +
+# documents per account), deduplicated and incremental
 uv run inso-dumper sync <child-slug>
 
 # one category only
-uv run inso-dumper sync <child-slug> --category announcements
+uv run inso-dumper sync <child-slug> --category messages
 ```
+
+Announcements and galleries are per child; messages and documents are
+account-level (the platform scopes them to the parent account, not the
+child) and are synced once per run regardless of the child argument.
 
 ## Sync
 
-`inso-dumper sync <child-slug>` walks the timeline API per category,
-downloads every post's media, and writes the dump under `./dump/`
-(override with `--dump-root PATH`):
+`inso-dumper sync <child-slug>` walks the platform APIs, downloads all
+media, and writes the dump under `./dump/` (override with
+`--dump-root PATH`):
 
 ```
 dump/
@@ -47,18 +51,35 @@ dump/
 │   ├── photos/<hash[:2]>/<hash>.<ext>
 │   ├── videos/<hash[:2]>/<hash>.<ext>
 │   └── attachments/<hash[:2]>/<hash>.<ext>
-└── <child-slug>/announcements/
-    ├── .manifest.sqlite     # sync state (idempotent re-runs)
-    └── <YYYY-MM-DD>-<post-slug>/
-        ├── post.json / post.html / post.md
-        ├── photos/1.jpeg    # symlink into _common/
-        ├── videos/…/files/  # only if present
+├── <child-slug>/announcements/
+│   ├── .manifest.sqlite     # per-child posts sync state
+│   └── <YYYY-MM-DD>-<post-slug>/
+│       ├── post.json / post.html / post.md
+│       ├── photos/1.jpeg    # symlink into _common/
+│       └── videos/…/files/  # only if present
+├── messages/                # account-level communicator
+│   ├── .manifest.sqlite     # conversations state (incremental tail fetches)
+│   └── <YYYY-MM-DD>-<group-slug>/
+│       ├── conversation.json
+│       ├── messages.json    # full history, appended incrementally
+│       └── attachments/<message-id>/1.jpeg → _common/
+└── documents/               # account-level drive (see gate note below)
 ```
 
-Re-runs skip already-dumped posts (nothing is re-downloaded).
-`--force <post-slug>` (repeatable) re-downloads a named post's media.
+Re-runs skip already-dumped posts and unchanged conversations (by
+`last_update`); changed conversations fetch only new messages.
+`--force` (repeatable) re-dumps a named item — post slug for
+announcements/galleries, conversation id or directory name for messages
+(full history re-fetch from 0). A `messages.json` that disagrees with
+the manifest is never appended to; the recovery is `--force`.
+
+**Documents gate:** the drive file-download shape could not be verified
+during discovery (empty drive), so the documents category is a loud
+skip until a non-empty drive capture pins it — it never guesses.
+
 The dumper is read-only against the platform: GET requests only, signed
-media URLs are never persisted, and mark-as-read is never called.
+media URLs are never persisted, and mark-as-read/upload endpoints are
+never called.
 
 ## Environment variables
 
