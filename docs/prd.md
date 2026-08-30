@@ -134,6 +134,7 @@ inso-dumper login            # interactive: validate credentials, save session  
 inso-dumper children         # list children + slugs                                [shipped]
 inso-dumper sync <child-slug> [--category announcements|galleries|both]            [shipped]
                              #   messages/documents/all land with the M3 spec
+inso-dumper index            # rebuild _index.json + index.html pages (offline)     [shipped]
 inso-dumper verify           # recompute checksums, report missing/corrupt blobs    [Phase 6]
 inso-dumper materialize      # replace hardlinks/symlinks with real copies          [Phase 6]
 ```
@@ -142,8 +143,9 @@ Options: `--config`, `--dump-root`, `--force <slug>` (repeatable), `-v/--verbose
 
 ### F7. Human-friendly output
 - Per-post `post.html` + `post.md` (shipped); per-event `index.html` photo gallery and the
-  top-level `index.html` + `_index.json` (by date/child/event name) are planned (Phase 5), so
-  "find photos from Dzień Kolorowy 2025" is a filename/search away.
+  top-level `index.html` + `_index.json` (by date/child/event name) ship with the offline
+  `inso-dumper index` command (Phase 5, shipped), so "find photos from Dzień Kolorowy 2025"
+  is a filename/search away.
 
 ---
 

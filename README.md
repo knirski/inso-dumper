@@ -63,15 +63,25 @@ dump/
 │       ├── conversation.json
 │       ├── messages.json    # full history, appended incrementally
 │       └── attachments/<message-id>/1.jpeg → _common/
-└── documents/               # account-level drive (see gate note below)
+├── <child-slug>/settlements/<YYYY-MM>/
+│   ├── settlement.json      # parsed month card (items, saldo, status)
+│   └── invoice.pdf          # when the month has a downloadable invoice
+├── documents/               # account-level drive (see gate note below)
+├── index.html               # top-level index (offline, rebuilt by `index`)
+└── _index.json              # machine-readable index of the whole dump
 ```
 
 Re-runs skip already-dumped posts and unchanged conversations (by
 `last_update`); changed conversations fetch only new messages.
 `--force` (repeatable) re-dumps a named item — post slug for
 announcements/galleries, conversation id or directory name for messages
-(full history re-fetch from 0). A `messages.json` that disagrees with
-the manifest is never appended to; the recovery is `--force`.
+(full history re-fetch from 0), YYYY-MM for settlements. A
+`messages.json` that disagrees with the manifest is never appended to;
+the recovery is `--force`.
+
+`inso-dumper index` (offline, no session) rebuilds `_index.json`, a
+top-level `index.html`, and a per-event gallery `index.html` from the
+dump tree — so "find photos from Dzień Kolorowy 2025" is a click away.
 
 **Documents gate:** the drive file-download shape could not be verified
 during discovery (empty drive), so the documents category is a loud

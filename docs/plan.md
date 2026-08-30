@@ -94,8 +94,10 @@ the user's real session.
   conversations shipped with the messages spec (manifest v3 tail fetch,
   real-traffic verified Aug 2026); incremental for settlements via the
   v4 manifest (invoice skip, real-traffic verified Aug 2026).
-- ⬜ `_index.json` + top-level `index.html` (by date/child/event name).
-- ⬜ Per-event `index.html` gallery (deferred from Phase 2).
+- ✅ `_index.json` + top-level `index.html` + per-event gallery
+  `index.html` — offline `inso-dumper index` command scans the dump
+  tree (no manifests, no network), rebuilds everything idempotently,
+  and skips malformed entries with a warning.
 
 **Check:** two consecutive syncs → second run 0 downloads (already true for
 posts); a new announcement/message appears after the next sync.
