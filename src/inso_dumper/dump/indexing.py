@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path, PurePosixPath
-from typing import assert_never
+from typing import assert_never, cast
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.dump.messages import _IMAGE_EXTS
@@ -151,9 +151,7 @@ class ConversationEntry:
             groups.setdefault(message_id, []).append(path)
         for line in self.message_texts:
             parts.append(
-                f"<p><strong>{escape(line.sender)}</strong> "
-                f"<small>{escape(line.date)}</small><br>"
-                f"{escape(line.text)}</p>"
+                f"<p><strong>{escape(line.sender)}</strong> <small>{escape(line.date)}</small><br>{escape(line.text)}</p>"
             )
             for path in groups.pop(line.id, ()):
                 parts.append(self._render_media(path))
@@ -292,17 +290,22 @@ def _scan_message_attachments(
     return tuple(photos), tuple(videos), tuple(files)
 
 
+def _mapping_field(mapping: object, key: str) -> object:
+    """Read one key from a JSON object; non-object values read as missing."""
+    if not isinstance(mapping, dict):
+        return ""
+    return cast("dict[str, object]", mapping).get(key, "")
+
+
 def _message_line(message: object) -> MessageLine:
     """Extract one message's text fields from a raw ``messages.json``
     entry (tolerant: missing or oddly-typed fields read as empty)."""
-    if not isinstance(message, dict):
-        return MessageLine(id="", sender="", date="", text="")
-    sender = message.get("sender")
+    sender = _mapping_field(message, "sender")
     return MessageLine(
-        id=str(message.get("id", "")),
-        sender=sender.get("name", "") if isinstance(sender, dict) else "",
-        date=str(message.get("send_date", "")),
-        text=str(message.get("message", "")),
+        id=str(_mapping_field(message, "id")),
+        sender=str(_mapping_field(sender, "name")),
+        date=str(_mapping_field(message, "send_date")),
+        text=str(_mapping_field(message, "message")),
     )
 
 
@@ -341,7 +344,7 @@ def scan_dump(dump_root: Path, *, log: logging.Logger) -> DumpIndex:
                 log.warning("skipping %s: unreadable messages.json", conv_dir)
                 continue
             last_date = datetime.fromtimestamp(last_ts, UTC).date().isoformat()
-            texts = tuple(_message_line(m) for m in messages)
+            texts = tuple(_message_line(m) for m in cast("list[object]", messages))
             photos, videos, files = _scan_message_attachments(conv_dir, log=log)
             conversations.append(
                 ConversationEntry(

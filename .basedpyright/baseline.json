@@ -2523,14 +2523,6 @@
                 "code": "reportUnusedCallResult",
                 "range": {
                     "startColumn": 4,
-                    "endColumn": 5,
-                    "lineCount": 3
-                }
-            },
-            {
-                "code": "reportUnusedCallResult",
-                "range": {
-                    "startColumn": 4,
                     "endColumn": 26,
                     "lineCount": 1
                 }

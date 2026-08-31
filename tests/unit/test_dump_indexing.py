@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -47,7 +47,7 @@ def _write_conversation(
         json.dumps({"id": conversation_id, "lastUpdate": last_ts, "recipient": {"name": "X"}}),
         encoding="utf-8",
     )
-    (d / "messages.json").write_text(
+    _ = (d / "messages.json").write_text(
         json.dumps(
             [
                 {
@@ -338,9 +338,12 @@ def test_conversation_without_attachments_gets_text_page(tmp_path: Path) -> None
 def test_conversation_page_escapes_hostile_message_text(tmp_path: Path) -> None:
     _write_conversation(tmp_path, "conv", "conv-1", count=1, last_ts=1787814351)
     conv_dir = tmp_path / "messages" / "conv"
-    messages = json.loads((conv_dir / "messages.json").read_text(encoding="utf-8"))
+    messages = cast(
+        "list[dict[str, object]]",
+        json.loads((conv_dir / "messages.json").read_text(encoding="utf-8")),
+    )
     messages[0]["message"] = "<script>alert(1)</script> & zło"
-    (conv_dir / "messages.json").write_text(json.dumps(messages), encoding="utf-8")
+    _ = (conv_dir / "messages.json").write_text(json.dumps(messages), encoding="utf-8")
 
     index = scan_dump(tmp_path, log=logging.getLogger("test"))
     html = index.conversations[0].render_html()
@@ -350,7 +353,7 @@ def test_conversation_page_escapes_hostile_message_text(tmp_path: Path) -> None:
 
 def test_conversation_page_attaches_media_to_its_message(tmp_path: Path) -> None:
     _write_conversation(tmp_path, "conv", "conv-1", count=2, last_ts=1787814351)
-    _write_message_attachment(tmp_path, "conv", "m0", "1.jpeg")
+    _ = _write_message_attachment(tmp_path, "conv", "m0", "1.jpeg")
     index = scan_dump(tmp_path, log=logging.getLogger("test"))
     html = index.conversations[0].render_html()
     text0 = html.index("wiadomość 0")
