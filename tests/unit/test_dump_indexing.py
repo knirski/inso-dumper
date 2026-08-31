@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -47,8 +47,20 @@ def _write_conversation(
         json.dumps({"id": conversation_id, "lastUpdate": last_ts, "recipient": {"name": "X"}}),
         encoding="utf-8",
     )
-    (d / "messages.json").write_text(
-        json.dumps([{"send_timestamp": last_ts - i} for i in range(count)]), encoding="utf-8"
+    _ = (d / "messages.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": f"m{i}",
+                    "send_timestamp": last_ts - i,
+                    "send_date": f"2026-08-27 0{i}",
+                    "message": f"wiadomość {i}",
+                    "sender": {"name": f"Nadawca {i}"},
+                }
+                for i in range(count)
+            ]
+        ),
+        encoding="utf-8",
     )
 
 
@@ -140,6 +152,11 @@ def test_scan_dump_collects_events_conversations_settlements(tmp_path: Path) -> 
     assert conv.dir == "2026-08-27-zolta"
     assert conv.messages == 3
     assert conv.last_date == "2026-08-27"
+    assert [(line.sender, line.text) for line in conv.message_texts] == [
+        ("Nadawca 0", "wiadomość 0"),
+        ("Nadawca 1", "wiadomość 1"),
+        ("Nadawca 2", "wiadomość 2"),
+    ]
 
     assert len(index.settlements) == 1
     st = index.settlements[0]
@@ -194,6 +211,8 @@ def test_render_event_html_escapes_and_links_media(tmp_path: Path) -> None:
     entry = index.children[0].events[0]
     html = entry.render_html()
     assert "Dzień &lt;Kolorowy&gt;" in html or "Dzień Kolorowy" in html
+    # The announcement body is embedded verbatim (server-sanitised HTML).
+    assert "<p>hello</p>" in html
     assert 'src="photos/1.jpeg"' in html
     assert 'src="videos/1.mp4"' in html
     assert 'href="files/1.pdf"' in html
@@ -295,18 +314,53 @@ def test_conversation_gallery_groups_by_message_and_escapes(tmp_path: Path) -> N
     assert 'href="attachments/msg-b/1.pdf"' in html2
 
 
-def test_conversation_without_attachments_has_no_media_and_no_page(tmp_path: Path) -> None:
+def test_conversation_without_attachments_gets_text_page(tmp_path: Path) -> None:
     _build_dump(tmp_path)  # conversation has no attachments dir
     log = logging.getLogger("test")
     index = scan_dump(tmp_path, log=log)
     conv = index.conversations[0]
     assert (conv.photos, conv.videos, conv.files) == (0, 0, 0)
+    html = conv.render_html()
+    assert "<strong>Nadawca 0</strong>" in html
+    assert "wiadomość 0" in html
+
+    # Text-only conversations still get a page and a top-level link.
     top = index.render_html()
-    assert 'href="messages/2026-08-27-zolta/index.html"' not in top
+    assert 'href="messages/2026-08-27-zolta/index.html"' in top
 
     result = write_index(tmp_path, log=log)
     assert isinstance(result, Ok)
-    assert not (tmp_path / "messages" / "2026-08-27-zolta" / "index.html").exists()
+    page = tmp_path / "messages" / "2026-08-27-zolta" / "index.html"
+    assert page.exists()
+    assert "wiadomość 1" in page.read_text(encoding="utf-8")
+
+
+def test_conversation_page_escapes_hostile_message_text(tmp_path: Path) -> None:
+    _write_conversation(tmp_path, "conv", "conv-1", count=1, last_ts=1787814351)
+    conv_dir = tmp_path / "messages" / "conv"
+    messages = cast(
+        "list[dict[str, object]]",
+        json.loads((conv_dir / "messages.json").read_text(encoding="utf-8")),
+    )
+    messages[0]["message"] = "<script>alert(1)</script> & zło"
+    _ = (conv_dir / "messages.json").write_text(json.dumps(messages), encoding="utf-8")
+
+    index = scan_dump(tmp_path, log=logging.getLogger("test"))
+    html = index.conversations[0].render_html()
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_conversation_page_attaches_media_to_its_message(tmp_path: Path) -> None:
+    _write_conversation(tmp_path, "conv", "conv-1", count=2, last_ts=1787814351)
+    _ = _write_message_attachment(tmp_path, "conv", "m0", "1.jpeg")
+    index = scan_dump(tmp_path, log=logging.getLogger("test"))
+    html = index.conversations[0].render_html()
+    text0 = html.index("wiadomość 0")
+    media = html.index('src="attachments/m0/1.jpeg"')
+    text1 = html.index("wiadomość 1")
+    # The photo renders inline, between its own message and the next one.
+    assert text0 < media < text1
 
 
 def test_write_index_writes_conversation_gallery_pages(tmp_path: Path) -> None:
@@ -319,6 +373,8 @@ def test_write_index_writes_conversation_gallery_pages(tmp_path: Path) -> None:
     assert page.exists()
     html = page.read_text(encoding="utf-8")
     assert 'src="attachments/msg-a/1.jpeg"' in html
+    assert "<strong>Nadawca 0</strong>" in html
+    assert "wiadomość 0" in html
 
     index_json = json.loads((dump_root / "_index.json").read_text(encoding="utf-8"))
     conv_json = index_json["conversations"][0]
