@@ -22,6 +22,8 @@ CORPUS = Path("docs/api-notes-data/billing-history-page.html")
 def _corpus_html() -> str:
     """The spike capture is saved as a JSON-quoted string (HAR-style);
     unescape when needed."""
+    if not CORPUS.exists():
+        pytest.skip(f"spike corpus absent: {CORPUS}")
     raw = CORPUS.read_text(encoding="utf-8")
     if raw.startswith('"'):
         return str(json.loads(raw))
