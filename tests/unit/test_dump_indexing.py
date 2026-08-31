@@ -229,7 +229,7 @@ def test_render_index_html_lists_children_events_messages_settlements(tmp_path: 
     assert "2021-anna-k" in html
     assert 'href="2021-anna-k/announcements/2025-09-15-dzien-kolorowy/index.html"' in html
     assert "2026-08-27-zolta" in html
-    assert "2021-anna-k" in html and "settlements" in html.lower() or "2025-08" in html
+    assert ("2021-anna-k" in html and "settlements" in html.lower()) or "2025-08" in html
 
 
 def test_write_index_creates_json_and_pages_idempotently(tmp_path: Path) -> None:

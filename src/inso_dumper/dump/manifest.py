@@ -25,6 +25,7 @@ output and deduped bytes are untouched.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -87,11 +88,9 @@ class Manifest:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._conn: sqlite3.Connection | None = sqlite3.connect(path)
-        try:
-            # sqlite creates the file 0644-ish; enforce the invariant.
+        # sqlite creates the file 0644-ish; enforce the invariant.
+        with contextlib.suppress(OSError):
             os.chmod(path, 0o600)
-        except OSError:
-            pass
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version not in (0, _SCHEMA_VERSION):
             self._conn.close()
@@ -299,10 +298,8 @@ class SettlementManifest:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._conn: sqlite3.Connection | None = sqlite3.connect(path)
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(path, 0o600)
-        except OSError:
-            pass
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version not in (0, _SETTLEMENTS_SCHEMA_VERSION):
             self._conn.close()

@@ -56,11 +56,10 @@ def _make_post(**media: Any) -> Post:
     return Post.model_validate(payload)
 
 
-async def _collect(
-    aiter: AsyncIterator[Ok[Post] | Err[CliError]]
-    | AsyncIterator[Ok[tuple[Any, str, bytes]] | Err[CliError]],
-) -> list[Ok[Post] | Err[CliError] | Ok[tuple[Any, str, bytes]]]:
-    out: list[Ok[Post] | Err[CliError] | Ok[tuple[Any, str, bytes]]] = []
+async def _collect[ValueT](
+    aiter: AsyncIterator[Ok[ValueT] | Err[CliError]],
+) -> list[Ok[ValueT] | Err[CliError]]:
+    out: list[Ok[ValueT] | Err[CliError]] = []
     async for item in aiter:
         out.append(item)
     return out
