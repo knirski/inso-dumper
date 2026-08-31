@@ -8,6 +8,7 @@ atomic ``_index.json`` / ``index.html`` output.
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,20 @@ def _write_conversation(
     (d / "messages.json").write_text(
         json.dumps([{"send_timestamp": last_ts - i} for i in range(count)]), encoding="utf-8"
     )
+
+
+def _write_message_attachment(
+    dump_root: Path, dir_name: str, message_id: str, filename: str, data: bytes = b"x"
+) -> Path:
+    """A message attachment link: flat per-message dir, symlink into a
+    plausible _common location (content there is irrelevant here)."""
+    blob = dump_root / "_common" / "photos" / "00" / f"{filename}.blob"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(data)
+    link = dump_root / "messages" / dir_name / "attachments" / message_id / filename
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(blob, link.parent))
+    return link
 
 
 def _write_settlement(dump_root: Path, child: str, month: str, *, invoice: bool) -> None:
@@ -238,3 +253,99 @@ def test_write_index_creates_json_and_pages_idempotently(tmp_path: Path) -> None
     index_json2 = json.loads((dump_root / "_index.json").read_text(encoding="utf-8"))
     index_json["generated_at"] = index_json2["generated_at"]
     assert index_json == index_json2
+
+
+# --- Message attachment galleries --------------------------------------------
+
+
+def _gallery_dump(tmp_path: Path) -> Path:
+    """A dump whose conversation carries mixed message attachments."""
+    _write_conversation(tmp_path, "2026-08-27-zolta", "conv-1", count=3, last_ts=1787814351)
+    _write_message_attachment(tmp_path, "2026-08-27-zolta", "msg-a", "1.jpeg")
+    _write_message_attachment(tmp_path, "2026-08-27-zolta", "msg-a", "2.jpeg")
+    _write_message_attachment(tmp_path, "2026-08-27-zolta", "msg-a", "3.mp4")
+    _write_message_attachment(tmp_path, "2026-08-27-zolta", "msg-b", "1.pdf")
+    return tmp_path
+
+
+def test_scan_dump_classifies_message_attachments_by_extension(tmp_path: Path) -> None:
+    index = scan_dump(_gallery_dump(tmp_path), log=logging.getLogger("test"))
+    conv = index.conversations[0]
+    assert (conv.photos, conv.videos, conv.files) == (2, 1, 1)
+    assert conv.photo_paths == ("attachments/msg-a/1.jpeg", "attachments/msg-a/2.jpeg")
+    assert conv.video_paths == ("attachments/msg-a/3.mp4",)
+    assert conv.file_paths == ("attachments/msg-b/1.pdf",)
+
+
+def test_conversation_gallery_groups_by_message_and_escapes(tmp_path: Path) -> None:
+    _write_conversation(tmp_path, "conv", "conv-1", count=1, last_ts=1787814351)
+    hostile = "<img src=x>"
+    _write_message_attachment(tmp_path, "conv", hostile, "1.jpeg")
+    index = scan_dump(tmp_path, log=logging.getLogger("test"))
+    html = index.conversations[0].render_html()
+    assert "<img src=x>" not in html
+    assert "&lt;img src=x&gt;" in html
+    assert 'src="attachments/&lt;img src=x&gt;/1.jpeg"' in html
+    # Message grouping: one section per message id, in stable order.
+    two = _gallery_dump(tmp_path)
+    html2 = scan_dump(two, log=logging.getLogger("test")).conversations[0].render_html()
+    assert html2.index("msg-a") < html2.index("msg-b")
+    assert 'src="attachments/msg-a/1.jpeg"' in html2
+    assert 'src="attachments/msg-a/3.mp4"' in html2
+    assert 'href="attachments/msg-b/1.pdf"' in html2
+
+
+def test_conversation_without_attachments_has_no_media_and_no_page(tmp_path: Path) -> None:
+    _build_dump(tmp_path)  # conversation has no attachments dir
+    log = logging.getLogger("test")
+    index = scan_dump(tmp_path, log=log)
+    conv = index.conversations[0]
+    assert (conv.photos, conv.videos, conv.files) == (0, 0, 0)
+    top = index.render_html()
+    assert 'href="messages/2026-08-27-zolta/index.html"' not in top
+
+    result = write_index(tmp_path, log=log)
+    assert isinstance(result, Ok)
+    assert not (tmp_path / "messages" / "2026-08-27-zolta" / "index.html").exists()
+
+
+def test_write_index_writes_conversation_gallery_pages(tmp_path: Path) -> None:
+    dump_root = _gallery_dump(tmp_path)
+    log = logging.getLogger("test")
+    result = write_index(dump_root, log=log)
+    assert isinstance(result, Ok)
+
+    page = dump_root / "messages" / "2026-08-27-zolta" / "index.html"
+    assert page.exists()
+    html = page.read_text(encoding="utf-8")
+    assert 'src="attachments/msg-a/1.jpeg"' in html
+
+    index_json = json.loads((dump_root / "_index.json").read_text(encoding="utf-8"))
+    conv_json = index_json["conversations"][0]
+    assert len(conv_json["photo_paths"]) == 2
+    assert conv_json["photo_paths"] == ["attachments/msg-a/1.jpeg", "attachments/msg-a/2.jpeg"]
+    assert conv_json["video_paths"] == ["attachments/msg-a/3.mp4"]
+    assert conv_json["file_paths"] == ["attachments/msg-b/1.pdf"]
+
+    # Top-level Messages section links to the gallery.
+    top = (dump_root / "index.html").read_text(encoding="utf-8")
+    assert 'href="messages/2026-08-27-zolta/index.html"' in top
+
+    # Idempotent: identical page on re-run.
+    before = page.read_text(encoding="utf-8")
+    write_index(dump_root, log=log)
+    assert page.read_text(encoding="utf-8") == before
+
+
+def test_scan_dump_skips_dangling_message_attachments(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_conversation(tmp_path, "conv", "conv-1", count=1, last_ts=1787814351)
+    _write_message_attachment(tmp_path, "conv", "msg-a", "1.jpeg")
+    dangling = tmp_path / "messages" / "conv" / "attachments" / "msg-a" / "2.jpeg"
+    dangling.symlink_to("../missing.jpeg")
+    with caplog.at_level(logging.WARNING, logger="inso_dumper.dump.indexing"):
+        index = scan_dump(tmp_path, log=logging.getLogger("inso_dumper.dump.indexing"))
+    conv = index.conversations[0]
+    assert conv.photos == 1
+    assert len(caplog.records) >= 1

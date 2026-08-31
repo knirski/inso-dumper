@@ -8,6 +8,7 @@ The command is offline (no session, no network): it rebuilds
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,13 @@ def _build_dump(tmp_path: Path) -> Path:
     (conv / "messages.json").write_text(
         json.dumps([{"send_timestamp": 1787814351}]), encoding="utf-8"
     )
+    # A message attachment gallery: one photo for one message.
+    blob = tmp_path / "_common" / "photos" / "00" / "blob"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"jpeg")
+    link = conv / "attachments" / "msg-1" / "1.jpeg"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(os.path.relpath(blob, link.parent))
     st = tmp_path / "2021-anna-k" / "settlements" / "2025-09"
     st.mkdir(parents=True)
     (st / "settlement.json").write_text(
@@ -73,6 +81,12 @@ def test_index_command_writes_json_and_pages(
         dump_root / "2021-anna-k" / "announcements" / "2025-09-15-dzien-kolorowy" / "index.html"
     )
     assert "Dzień Kolorowy" in event_page.read_text(encoding="utf-8")
+
+    # Message attachment gallery: page written and linked from the top.
+    gallery = dump_root / "messages" / "2026-08-27-zolta" / "index.html"
+    assert gallery.exists()
+    assert 'src="attachments/msg-1/1.jpeg"' in gallery.read_text(encoding="utf-8")
+    assert 'href="messages/2026-08-27-zolta/index.html"' in top
 
 
 def test_index_command_is_idempotent(tmp_path: Path, cli_runner: typer.testing.CliRunner) -> None:
