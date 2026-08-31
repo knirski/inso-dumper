@@ -97,7 +97,9 @@ the user's real session.
 - ✅ `_index.json` + top-level `index.html` + per-event gallery
   `index.html` — offline `inso-dumper index` command scans the dump
   tree (no manifests, no network), rebuilds everything idempotently,
-  and skips malformed entries with a warning.
+  and skips malformed entries with a warning. Message attachments get
+  their own per-conversation gallery pages (grouped by message id,
+  classified by extension), linked from the top-level page.
 
 **Check:** two consecutive syncs → second run 0 downloads (already true for
 posts); a new announcement/message appears after the next sync.

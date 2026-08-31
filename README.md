@@ -81,8 +81,9 @@ announcements/galleries, conversation id or directory name for messages
 the recovery is `--force`.
 
 `inso-dumper index` (offline, no session) rebuilds `_index.json`, a
-top-level `index.html`, and a per-event gallery `index.html` from the
-dump tree — so "find photos from Dzień Kolorowy 2025" is a click away.
+top-level `index.html`, per-event gallery `index.html` pages, and a
+per-conversation gallery for message attachments — so "find photos from
+Dzień Kolorowy 2025" is a click away.
 
 `inso-dumper verify` (offline) re-hashes every `_common/` blob against
 its content-addressed filename and resolves every symlink; it exits 0

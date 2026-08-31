@@ -19,15 +19,18 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from html import escape
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import assert_never
 
 from inso_dumper._result import Err, Ok
+from inso_dumper.dump.messages import _IMAGE_EXTS
 from inso_dumper.dump.writer import _write_bytes, ensure_private_dir
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.models.timeline import Photo, Post, Video
 
 log = logging.getLogger("inso_dumper.dump.indexing")
+
+_VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,9 +89,63 @@ class ChildEntry:
 
 @dataclass(frozen=True, slots=True)
 class ConversationEntry:
+    """One conversation directory with its message-attachment gallery.
+
+    Media paths are relative to the conversation dir and carry the
+    message-id segment (``attachments/<m-id>/<n><ext>``); they are
+    classified by extension at scan time (original attachment names
+    are not stored at the link layer)."""
+
     dir: str
     messages: int
     last_date: str  # ISO date of the newest message
+    photo_paths: tuple[str, ...] = ()
+    video_paths: tuple[str, ...] = ()
+    file_paths: tuple[str, ...] = ()
+
+    @property
+    def photos(self) -> int:
+        return len(self.photo_paths)
+
+    @property
+    def videos(self) -> int:
+        return len(self.video_paths)
+
+    @property
+    def files(self) -> int:
+        return len(self.file_paths)
+
+    def render_html(self) -> str:
+        """The conversation gallery: media grouped by message id (one
+        section per message, stable order), like a mini event page."""
+        parts: list[str] = [
+            "<!doctype html>",
+            '<html lang="pl"><head><meta charset="utf-8">',
+            f"<title>{escape(self.dir)}</title></head><body>",
+            f"<h1>{escape(self.dir)}</h1>",
+            f"<p>{self.messages} messages · {self.photos} photos · "
+            f"{self.videos} videos · {self.files} files</p>",
+        ]
+        groups: dict[str, list[str]] = {}
+        for path in (*self.photo_paths, *self.video_paths, *self.file_paths):
+            message_id = path.split("/")[1] if path.count("/") >= 2 else ""
+            groups.setdefault(message_id, []).append(path)
+        for message_id, paths in groups.items():
+            heading = f"message {escape(message_id)}" if message_id else "media"
+            parts.append(f"<h2>{heading}</h2>")
+            for path in paths:
+                ext = PurePosixPath(path).suffix.lower()
+                quoted = escape(path, quote=True)
+                if ext in _IMAGE_EXTS:
+                    parts.append(f'<p><img src="{quoted}" alt=""></p>')
+                elif ext in _VIDEO_EXTS:
+                    parts.append(f'<p><video controls src="{quoted}"></video></p>')
+                else:
+                    parts.append(
+                        f'<p><a href="{quoted}">{escape(PurePosixPath(path).name)}</a></p>'
+                    )
+        parts.append("</body></html>")
+        return "\n".join(parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,9 +185,13 @@ class DumpIndex:
             parts.append("</ul>")
         parts.append("<h2>Messages</h2><ul>")
         for conv in self.conversations:
-            parts.append(
-                f"<li>{escape(conv.dir)} — {conv.messages} messages, last {escape(conv.last_date)}</li>"
-            )
+            label = f"{escape(conv.dir)} — {conv.messages} messages, last {escape(conv.last_date)}"
+            if conv.photos or conv.videos or conv.files:
+                href = f"messages/{escape(conv.dir)}/index.html"
+                counts = f"({conv.photos} photos, {conv.videos} videos, {conv.files} files)"
+                parts.append(f'<li><a href="{href}">{label}</a> {counts}</li>')
+            else:
+                parts.append(f"<li>{label}</li>")
         parts.append("</ul><h2>Settlements</h2><ul>")
         for st in self.settlements:
             parts.append(
@@ -171,6 +232,37 @@ def event_entry(child_slug: str, dir_name: str, post: Post) -> EventEntry:
     )
 
 
+def _scan_message_attachments(
+    conv_dir: Path, *, log: logging.Logger
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Classify one conversation's on-disk attachment links by file
+    extension (the original attachment names are not stored at the
+    link layer). Dangling symlinks are warned and skipped. Paths are
+    relative to ``conv_dir``."""
+    attachments = conv_dir / "attachments"
+    if not attachments.is_dir():
+        return (), (), ()
+    photos: list[str] = []
+    videos: list[str] = []
+    files: list[str] = []
+    for message_dir in sorted(p for p in attachments.iterdir() if p.is_dir()):
+        for link in sorted(message_dir.iterdir()):
+            rel = link.relative_to(conv_dir).as_posix()
+            if link.is_symlink() and not link.resolve().exists():
+                log.warning("skipping dangling attachment link: %s", rel)
+                continue
+            if not link.is_file():
+                continue
+            ext = PurePosixPath(rel).suffix.lower()
+            if ext in _IMAGE_EXTS:
+                photos.append(rel)
+            elif ext in _VIDEO_EXTS:
+                videos.append(rel)
+            else:
+                files.append(rel)
+    return tuple(photos), tuple(videos), tuple(files)
+
+
 def scan_dump(dump_root: Path, *, log: logging.Logger) -> DumpIndex:
     """Walk the dump tree read-only and build the index. Malformed or
     unreadable per-item JSON is skipped with a warning."""
@@ -206,8 +298,16 @@ def scan_dump(dump_root: Path, *, log: logging.Logger) -> DumpIndex:
                 log.warning("skipping %s: unreadable messages.json", conv_dir)
                 continue
             last_date = datetime.fromtimestamp(last_ts, UTC).date().isoformat()
+            photos, videos, files = _scan_message_attachments(conv_dir, log=log)
             conversations.append(
-                ConversationEntry(dir=conv_dir.name, messages=count, last_date=last_date)
+                ConversationEntry(
+                    dir=conv_dir.name,
+                    messages=count,
+                    last_date=last_date,
+                    photo_paths=photos,
+                    video_paths=videos,
+                    file_paths=files,
+                )
             )
 
     settlements: list[SettlementEntry] = []
@@ -244,6 +344,12 @@ def write_index(dump_root: Path, *, log: logging.Logger) -> CliResult[DumpIndex]
                 event_dir = dump_root / child.slug / "announcements" / event.dir
                 ensure_private_dir(event_dir)
                 _write_bytes(event_dir / "index.html", event.render_html().encode("utf-8"))
+        for conv in index.conversations:
+            if not (conv.photos or conv.videos or conv.files):
+                continue  # no media → no gallery page; top-level stays text
+            conv_dir = dump_root / "messages" / conv.dir
+            ensure_private_dir(conv_dir)
+            _write_bytes(conv_dir / "index.html", conv.render_html().encode("utf-8"))
     except OSError:
         log.warning("index write failed under %s", dump_root)
         return Err(CliError(kind=CliErrorKind.INTERNAL, subject="index_write"))
