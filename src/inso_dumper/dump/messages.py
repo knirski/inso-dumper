@@ -62,7 +62,7 @@ def _conversation_id_on_disk(directory: Path) -> str | None:
     ``conversation.json``, or ``None`` when absent/unreadable."""
     try:
         payload = json.loads((directory / _CONVERSATION_JSON).read_bytes())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -96,9 +96,7 @@ def resolve_conversation_dir(
         n += 1
 
 
-def write_conversation_payload(
-    conversation: Conversation, target_dir: Path
-) -> CliResult[None]:
+def write_conversation_payload(conversation: Conversation, target_dir: Path) -> CliResult[None]:
     """(Re)write only ``conversation.json`` — the tail-append path uses
     this to refresh the list payload (``lastUpdate``, ``excerpt``,
     ``read``) without touching ``messages.json``."""
@@ -149,7 +147,7 @@ def append_messages(
         existing: list[dict[str, object]] = (
             json.loads(history_path.read_bytes()) if history_path.exists() else []
         )
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
         return Err(CliError(kind=CliErrorKind.INTERNAL, subject="messages_history_read"))
     if expected_existing is not None and len(existing) != expected_existing:
         log.warning(

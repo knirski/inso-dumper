@@ -128,11 +128,14 @@ async def run(
 
             post_slug = derive_post_slug(post)
             recorded = manifest.recorded_dir(post.id)
-            if recorded is not None and post_slug not in forced:
-                if (announcements_dir / recorded).is_dir():
-                    posts_skipped += 1
-                    log.info("skipping %s", post_slug)
-                    continue
+            if (
+                recorded is not None
+                and post_slug not in forced
+                and (announcements_dir / recorded).is_dir()
+            ):
+                posts_skipped += 1
+                log.info("skipping %s", post_slug)
+                continue
 
             if post_slug in forced:
                 # Drop the stale row first so an interrupted forced
@@ -356,7 +359,7 @@ async def run_messages(
                 match appended:
                     case Err(error):
                         return Err(error)
-                    case Ok(added):
+                    case Ok(_):
                         pass
                 payload = write_conversation_payload(conversation, target_dir)
                 match payload:
@@ -382,7 +385,7 @@ async def run_messages(
             match linked:
                 case Err(error):
                     return Err(error)
-                case Ok(count):
+                case Ok(_):
                     pass
             attachments_linked += linked.value
 

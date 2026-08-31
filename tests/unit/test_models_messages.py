@@ -13,8 +13,8 @@ from inso_dumper.models.messages import (
     Conversation,
     ConversationListPage,
     Message,
-    MessageAttachmentUrls,
     MessageAttachments,
+    MessageAttachmentUrls,
 )
 
 SPIKE_DIR = Path("docs/api-notes-data")

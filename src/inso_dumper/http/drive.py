@@ -57,7 +57,7 @@ def parse_drive_listing(body: bytes) -> CliResult[DriveListing]:
     """
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return _platform_changed()
     try:
         return Ok(DriveListing.model_validate(data))

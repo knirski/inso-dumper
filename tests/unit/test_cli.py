@@ -16,15 +16,11 @@ LOG = logging.getLogger("test")
 
 def _capture_print(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
     calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(
-        cli._console_err, "print", lambda *a, **k: calls.append(a), raising=True
-    )
+    monkeypatch.setattr(cli._console_err, "print", lambda *a, **k: calls.append(a), raising=True)
     return calls
 
 
-def test_die_prints_login_hint_for_session_expired(
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_die_prints_login_hint_for_session_expired(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both session-expiry paths (missing local file, server-rejected
     saved session surfaced by the shells) must end with the re-login
     hint — it used to print only on the local path."""

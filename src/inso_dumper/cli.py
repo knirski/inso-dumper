@@ -35,6 +35,8 @@ from rich.table import Table
 
 from inso_dumper._result import Err, Ok
 from inso_dumper.config import load_config
+from inso_dumper.dump.audit import materialize_dump, verify_dump
+from inso_dumper.dump.indexing import DumpIndex, write_index
 from inso_dumper.dump.sync import (
     SyncSummary,
     run_documents,
@@ -42,8 +44,6 @@ from inso_dumper.dump.sync import (
     run_settlements,
 )
 from inso_dumper.dump.sync import run as sync_run
-from inso_dumper.dump.audit import materialize_dump, verify_dump
-from inso_dumper.dump.indexing import DumpIndex, write_index
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
 from inso_dumper.http.client import HttpxClient

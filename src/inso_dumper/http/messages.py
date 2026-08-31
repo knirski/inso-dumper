@@ -53,7 +53,7 @@ def parse_conversations_page(body: bytes) -> CliResult[ConversationListPage]:
     """
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return _conversations_platform_changed()
     try:
         return Ok(ConversationListPage.model_validate(data))
@@ -70,7 +70,7 @@ def parse_messages_page(body: bytes) -> CliResult[list[Message]]:
     """
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return _messages_platform_changed()
     if not isinstance(data, list):
         return _messages_platform_changed()
@@ -109,9 +109,7 @@ async def list_conversations(
                 response = value
         if response.status != 200:
             yield Err(
-                CliError(
-                    kind=CliErrorKind.HTTP, subject=f"conversations_status_{response.status}"
-                )
+                CliError(kind=CliErrorKind.HTTP, subject=f"conversations_status_{response.status}")
             )
             return
         page_or_err = parse_conversations_page(response.body)

@@ -17,6 +17,8 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "basedpyright>=1.13",
+    "python-semantic-release>=10.6.2",
+    "uv-build>=0.12.7",
 ]
 
 [build-system]
@@ -56,6 +58,16 @@ typeCheckingMode = "recommended"
 pythonVersion = "3.14"
 include = ["src", "tests"]
 exclude = ["**/__pycache__"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+tag_format = "v{version}"
+commit_parser = "conventional"
+build_command = "uv build"
+allow_zero_version = true
+
+[tool.semantic_release.branches.main]
+match = "main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

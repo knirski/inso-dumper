@@ -211,7 +211,7 @@ SYNC_POST = {
 
 
 def _sync_script(second_run: bool) -> list[Any]:
-    def page(items: list[Any]) -> tuple[int, bytes, list]:
+    def page(items: list[Any]) -> tuple[int, bytes, list[Any]]:
         body = json.dumps({"items": items, "waitingToProcess": 0}).encode("utf-8")
         return (200, body, [])
 
@@ -364,14 +364,20 @@ def _msg_payload(msg_id: str, with_attachment: bool = False) -> dict[str, Any]:
     }
 
 
-def _conv_page(convs: list[dict[str, Any]]) -> tuple[int, bytes, list]:
+def _conv_page(convs: list[dict[str, Any]]) -> tuple[int, bytes, list[Any]]:
     body = json.dumps(
-        {"categories": [], "category": "main", "conversations": convs, "templates": [], "unreadCount": 0}
+        {
+            "categories": [],
+            "category": "main",
+            "conversations": convs,
+            "templates": [],
+            "unreadCount": 0,
+        }
     ).encode()
     return (200, body, [])
 
 
-def _msg_page(msgs: list[dict[str, Any]]) -> tuple[int, bytes, list]:
+def _msg_page(msgs: list[dict[str, Any]]) -> tuple[int, bytes, list[Any]]:
     return (200, json.dumps(msgs).encode(), [])
 
 
@@ -389,7 +395,9 @@ def test_sync_messages_category_happy_path(
     cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dump = _prepare_sync_env(tmp_path, monkeypatch, _messages_script())
-    result = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+    result = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)]
+    )
 
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     assert "1 conversations (1 new messages, 1 attachments)" in result.stdout
@@ -404,7 +412,9 @@ def test_sync_messages_second_run_reports_skipped(
     cli_runner: typer.testing.CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dump = _prepare_sync_env(tmp_path, monkeypatch, _messages_script())
-    first = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+    first = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)]
+    )
     assert first.exit_code == 0, (first.stdout or "") + (first.stderr or "")
 
     # same lastUpdate -> skipped; only list requests
@@ -414,7 +424,9 @@ def test_sync_messages_second_run_reports_skipped(
         [_conv_page([_conv_payload()]), _conv_page([])],
     )
     assert rerun is not None
-    second = cli_runner.invoke(app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)])
+    second = cli_runner.invoke(
+        app, ["sync", "franek", "--category", "messages", "--dump-root", str(dump)]
+    )
 
     assert second.exit_code == 0, (second.stdout or "") + (second.stderr or "")
     assert "0 conversations (0 new messages, 0 attachments)" in second.stdout
@@ -518,9 +530,7 @@ def test_sync_settlements_force_month_redownloads(
     )
     assert first.exit_code == 0, (first.stdout or "") + (first.stderr or "")
 
-    _prepare_sync_env(
-        tmp_path, monkeypatch, _settlements_script(invoice_body=b"%PDF-forced")
-    )
+    _prepare_sync_env(tmp_path, monkeypatch, _settlements_script(invoice_body=b"%PDF-forced"))
     second = cli_runner.invoke(
         app,
         [

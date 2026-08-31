@@ -49,7 +49,9 @@ def _listing(
 ) -> bytes:
     return json.dumps(
         {
-            "breadcrumbs": breadcrumbs if breadcrumbs is not None else [{"name": "Pliki", "id": None}],
+            "breadcrumbs": breadcrumbs
+            if breadcrumbs is not None
+            else [{"name": "Pliki", "id": None}],
             "directories": dirs or [],
             "directory": None,
             "files": [],
@@ -116,7 +118,9 @@ def test_walk_drive_directory_missing_id_is_drive_node_error() -> None:
 
 
 def test_walk_drive_directory_blank_name_is_drive_node_error() -> None:
-    client = FakeHttpClientScript([_response(200, _listing([{"id": "d1", "name": "  "}, {"id": "d2", "name": "ok"}]))])
+    client = FakeHttpClientScript(
+        [_response(200, _listing([{"id": "d1", "name": "  "}, {"id": "d2", "name": "ok"}]))]
+    )
 
     from inso_dumper.http.drive import walk_drive
 
@@ -166,9 +170,7 @@ def test_walk_drive_slugifies_path_components() -> None:
     root = _listing([{"id": "d1", "name": "../escape"}, {"id": "d2", "name": "a/b"}])
     d1 = _listing([])
     d2 = _listing([])
-    client = FakeHttpClientScript(
-        [_response(200, root), _response(200, d1), _response(200, d2)]
-    )
+    client = FakeHttpClientScript([_response(200, root), _response(200, d1), _response(200, d2)])
     seen = _walk(client)
     paths = [path for path, _ in seen]
     assert "escape" in paths

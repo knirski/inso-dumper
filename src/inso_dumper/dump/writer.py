@@ -177,7 +177,7 @@ def _is_same_post_on_disk(target_dir: Path, post: Post) -> bool:
     try:
         data = json.loads((target_dir / "post.json").read_bytes())
         return isinstance(data, dict) and data.get("id") == post.id
-    except (OSError, ValueError):
+    except OSError, ValueError:
         # ValueError covers JSONDecodeError and non-UTF-8 bytes.
         return False
 
@@ -310,4 +310,10 @@ def link_media_to_post(
     return Ok(link)
 
 
-__all__ = ["ensure_private_dir", "link_media_to_post", "resolve_post_dir", "write_deduped_media", "write_post"]
+__all__ = [
+    "ensure_private_dir",
+    "link_media_to_post",
+    "resolve_post_dir",
+    "write_deduped_media",
+    "write_post",
+]
