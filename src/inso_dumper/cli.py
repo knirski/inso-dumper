@@ -42,6 +42,7 @@ from inso_dumper.dump.sync import (
     run_settlements,
 )
 from inso_dumper.dump.sync import run as sync_run
+from inso_dumper.dump.audit import materialize_dump, verify_dump
 from inso_dumper.dump.indexing import DumpIndex, write_index
 from inso_dumper.errors import CliError, CliErrorKind, CliResult
 from inso_dumper.http.children_shell import list_children as list_children_shell
@@ -547,5 +548,85 @@ def index(
         f"Indexed {events} events across {len(idx.children)} children "
         f"({len(idx.conversations)} conversations, {len(idx.settlements)} settlement "
         f"children) in {time.monotonic() - start:.1f}s."
+    )
+    raise typer.Exit(0)
+
+
+def _offline_dump_command[ReportT](
+    dump_root: Path,
+    verbose: bool,
+    run: Callable[[Path, Logger], CliResult[ReportT]],
+) -> tuple[ReportT, float]:
+    """Shared body for the offline dump commands (index, verify,
+    materialize): no session, no network, one timed dump-tree pass.
+    Returns ``(report, elapsed_seconds)``."""
+    setup_logging(verbose=verbose or is_verbose())
+    log = get_logger("cli")
+
+    root = dump_root.expanduser().resolve()
+    root_result = _ensure_dump_root(root)
+    if isinstance(root_result, Err):
+        _die(root_result.error, log)
+
+    async def _do() -> CliResult[ReportT]:
+        return run(root, log)
+
+    start = time.monotonic()
+    result = _dispatch(_do, log)
+    if isinstance(result, Err):
+        _die(result.error, log)
+    return result.value, time.monotonic() - start
+
+
+@app.command()
+def verify(
+    dump_root: Path = typer.Option(Path("dump"), "--dump-root", help="Dump directory to audit."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """Recompute blob checksums and report missing/corrupt files.
+
+    Exits 0 when the dump is clean, 1 when findings exist (corrupt
+    blobs, dangling links, unexpected store files)."""
+    log = get_logger("cli")
+    report, seconds = _offline_dump_command(dump_root, verbose, verify_dump)
+    log.info(
+        "verify done blobs=%d corrupt=%d links=%d dangling=%d",
+        report.blobs,
+        len(report.corrupt),
+        report.links,
+        len(report.dangling),
+    )
+    _console_out.print(
+        f"Verified {report.blobs} blobs ({len(report.corrupt)} corrupt), "
+        f"{report.links} links ({len(report.dangling)} dangling) in {seconds:.1f}s."
+    )
+    if report.corrupt or report.unexpected or report.dangling:
+        _console_err.print(
+            "Integrity findings: "
+            f"{len(report.corrupt)} corrupt, {len(report.unexpected)} unexpected, "
+            f"{len(report.dangling)} dangling. Run with -v for the full list.",
+            style="red",
+        )
+        raise typer.Exit(1)
+    raise typer.Exit(0)
+
+
+@app.command()
+def materialize(
+    dump_root: Path = typer.Option(
+        Path("dump"), "--dump-root", help="Dump directory to materialize."
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable DEBUG-level logging."),
+) -> NoReturn:
+    """Replace symlinks with real copies (makes the tree self-contained).
+
+    ``_common/`` is kept: future syncs still dedup against it. Dangling
+    links are skipped with a warning; safe to re-run."""
+    log = get_logger("cli")
+    report, seconds = _offline_dump_command(dump_root, verbose, materialize_dump)
+    log.info("materialize done copied=%d dangling=%d", report.copied, report.skipped_dangling)
+    _console_out.print(
+        f"Materialized {report.copied} links ({report.skipped_dangling} dangling "
+        f"skipped) in {seconds:.1f}s."
     )
     raise typer.Exit(0)

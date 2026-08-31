@@ -102,11 +102,20 @@ the user's real session.
 **Check:** two consecutive syncs → second run 0 downloads (already true for
 posts); a new announcement/message appears after the next sync.
 
-## Phase 6 — Polish ⬜
+## Phase 6 — Polish ✅
 
-- ⬜ `verify` command (checksum recompute, corrupt-blob report).
-- ⬜ `materialize` command (resolve hardlinks/symlinks to copies).
-- ⬜ README with privacy notes; packaging (`uv tool install`).
+- ✅ `verify` command: re-hashes every `_common/` blob against its
+  content-addressed filename (the sha256 hex *is* the blob name — no
+  separate checksum storage) and resolves every symlink; exits 0 clean,
+  1 with findings (new documented exit code). Dangling links are
+  reported as missing blobs.
+- ✅ `materialize` command: replaces each resolvable symlink with a real
+  copy (atomic 0600 write); `_common/` is kept so future syncs still
+  dedup against it; dangling links skipped with a warning. Note: the
+  implementation never used hardlinks (symlink-or-copy only), so the
+  PRD's "hardlinks" wording is moot.
+- ✅ README privacy notes + command docs; packaging sanity via
+  `uv build`.
 
 ## Phase 7 — Settlements follow-up spec ✅
 
