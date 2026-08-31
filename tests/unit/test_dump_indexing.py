@@ -348,6 +348,18 @@ def test_conversation_page_escapes_hostile_message_text(tmp_path: Path) -> None:
     assert "&lt;script&gt;" in html
 
 
+def test_conversation_page_attaches_media_to_its_message(tmp_path: Path) -> None:
+    _write_conversation(tmp_path, "conv", "conv-1", count=2, last_ts=1787814351)
+    _write_message_attachment(tmp_path, "conv", "m0", "1.jpeg")
+    index = scan_dump(tmp_path, log=logging.getLogger("test"))
+    html = index.conversations[0].render_html()
+    text0 = html.index("wiadomość 0")
+    media = html.index('src="attachments/m0/1.jpeg"')
+    text1 = html.index("wiadomość 1")
+    # The photo renders inline, between its own message and the next one.
+    assert text0 < media < text1
+
+
 def test_write_index_writes_conversation_gallery_pages(tmp_path: Path) -> None:
     dump_root = _gallery_dump(tmp_path)
     log = logging.getLogger("test")

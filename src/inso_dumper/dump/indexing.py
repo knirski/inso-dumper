@@ -35,8 +35,10 @@ _VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
 
 @dataclass(frozen=True, slots=True)
 class MessageLine:
-    """One message's text as rendered on the conversation page."""
+    """One message's text as rendered on the conversation page. ``id``
+    ties the message to its attachment links (``attachments/<id>/…``)."""
 
+    id: str
     sender: str
     date: str  # server-formatted, verbatim
     text: str
@@ -131,9 +133,10 @@ class ConversationEntry:
         return len(self.file_paths)
 
     def render_html(self) -> str:
-        """The conversation page: the full message text history in
-        ``messages.json`` order, then the media gallery grouped by
-        message id (one section per message, stable order)."""
+        """The conversation page: the full message history in
+        ``messages.json`` order, each message followed by its own
+        attachments. Attachments whose message id has no matching
+        message (or none at all) render in leftover sections after."""
         parts: list[str] = [
             "<!doctype html>",
             '<html lang="pl"><head><meta charset="utf-8">',
@@ -142,32 +145,35 @@ class ConversationEntry:
             f"<p>{self.messages} messages · {self.photos} photos · "
             f"{self.videos} videos · {self.files} files</p>",
         ]
+        groups: dict[str, list[str]] = {}
+        for path in (*self.photo_paths, *self.video_paths, *self.file_paths):
+            message_id = path.split("/")[1] if path.count("/") >= 2 else ""
+            groups.setdefault(message_id, []).append(path)
         for line in self.message_texts:
             parts.append(
                 f"<p><strong>{escape(line.sender)}</strong> "
                 f"<small>{escape(line.date)}</small><br>"
                 f"{escape(line.text)}</p>"
             )
-        groups: dict[str, list[str]] = {}
-        for path in (*self.photo_paths, *self.video_paths, *self.file_paths):
-            message_id = path.split("/")[1] if path.count("/") >= 2 else ""
-            groups.setdefault(message_id, []).append(path)
+            for path in groups.pop(line.id, ()):
+                parts.append(self._render_media(path))
         for message_id, paths in groups.items():
             heading = f"message {escape(message_id)}" if message_id else "media"
             parts.append(f"<h2>{heading}</h2>")
             for path in paths:
-                ext = PurePosixPath(path).suffix.lower()
-                quoted = escape(path, quote=True)
-                if ext in _IMAGE_EXTS:
-                    parts.append(f'<p><img src="{quoted}" alt=""></p>')
-                elif ext in _VIDEO_EXTS:
-                    parts.append(f'<p><video controls src="{quoted}"></video></p>')
-                else:
-                    parts.append(
-                        f'<p><a href="{quoted}">{escape(PurePosixPath(path).name)}</a></p>'
-                    )
+                parts.append(self._render_media(path))
         parts.append("</body></html>")
         return "\n".join(parts)
+
+    def _render_media(self, path: str) -> str:
+        """One attachment as markup, classified by extension."""
+        ext = PurePosixPath(path).suffix.lower()
+        quoted = escape(path, quote=True)
+        if ext in _IMAGE_EXTS:
+            return f'<p><img src="{quoted}" alt=""></p>'
+        if ext in _VIDEO_EXTS:
+            return f'<p><video controls src="{quoted}"></video></p>'
+        return f'<p><a href="{quoted}">{escape(PurePosixPath(path).name)}</a></p>'
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,9 +296,10 @@ def _message_line(message: object) -> MessageLine:
     """Extract one message's text fields from a raw ``messages.json``
     entry (tolerant: missing or oddly-typed fields read as empty)."""
     if not isinstance(message, dict):
-        return MessageLine(sender="", date="", text="")
+        return MessageLine(id="", sender="", date="", text="")
     sender = message.get("sender")
     return MessageLine(
+        id=str(message.get("id", "")),
         sender=sender.get("name", "") if isinstance(sender, dict) else "",
         date=str(message.get("send_date", "")),
         text=str(message.get("message", "")),
